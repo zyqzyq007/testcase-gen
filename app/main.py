@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import os
 
@@ -19,9 +20,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(project.router)
 app.include_router(testcase.router)
+app.include_router(project.router)
 
 @app.get("/")
 async def root():
     return {"message": "C Unit Test Generator API is running"}
+
+if os.path.isdir("Frontend/dist"):
+    app.mount("/", StaticFiles(directory="Frontend/dist", html=True), name="static")

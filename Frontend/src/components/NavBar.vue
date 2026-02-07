@@ -45,7 +45,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../store'
-import { Check, Upload, FolderTree, Zap, BarChart3 } from 'lucide-vue-next'
+import { Check, Upload, FolderTree, Zap, BarChart3, LayoutDashboard } from 'lucide-vue-next'
 
 const store = useAppStore()
 const route = useRoute()
@@ -53,6 +53,7 @@ const router = useRouter()
 
 const steps = [
   { name: '项目上传', path: '/', icon: Upload },
+  { name: '总览看板', path: '/dashboard', icon: LayoutDashboard },
   { name: '项目浏览', path: '/browse', icon: FolderTree },
   { name: '测试生成', path: '/generate', icon: Zap },
   { name: '执行结果', path: '/result', icon: BarChart3 },
@@ -61,16 +62,19 @@ const steps = [
 const currentStepIndex = computed(() => {
   const path = route.path
   if (path === '/') return 0
-  if (path === '/browse') return 1
-  if (path === '/generate') return 2
-  if (path === '/result') return 3
+  if (path === '/dashboard') return 1
+  if (path === '/browse') return 2
+  if (path === '/generate') return 3
+  if (path === '/result') return 4
   return 0
 })
 
 const isCompleted = (index) => {
   if (index === 0) return store.projectId !== null && currentStepIndex.value > 0
-  if (index === 1) return store.functionId !== null && currentStepIndex.value > 1
-  if (index === 2) return store.taskId !== null && currentStepIndex.value > 2
+  if (index === 1) return store.projectId !== null && currentStepIndex.value > 1
+  if (index === 2) return store.functionId !== null && currentStepIndex.value > 2
+  if (index === 3) return store.taskId !== null && currentStepIndex.value > 3
+  if (index === 4) return currentStepIndex.value > 4
   return false
 }
 

@@ -7,7 +7,7 @@ import os
 from app.services.project_service import ProjectService
 from app.services.parser_service import ParserService
 from app.services.joern_service import JoernService
-from app.models.project import UploadResponse, ProjectStructure, FileStructure, FunctionInfo, FunctionInfo
+from app.models.project import UploadResponse, ProjectStructure, FileStructure, FunctionInfo, ExtractTestTargetsResponse, TestTargetStats
 
 router = APIRouter(prefix="/api/project", tags=["project"])
 
@@ -61,6 +61,90 @@ async def get_project_structure(project_id: str):
         project_id=project_id,
         files=structure
     )
+
+@router.get("/{project_id}/test-targets", response_model=ExtractTestTargetsResponse)
+async def get_test_targets(
+    project_id: str,
+    include_optional_static: bool = Query(True),
+    include_skipped: bool = Query(False),
+    header_strategy: str = Query("basename")
+):
+    result = ParserService.extract_test_targets(project_id, header_strategy=header_strategy)
+
+    optional_static = result.optional_static if include_optional_static else []
+    skipped = result.skipped if include_skipped else []
+
+    return ExtractTestTargetsResponse(
+        project_id=project_id,
+        must_test=result.must_test,
+        optional_static=optional_static,
+        skipped=skipped,
+        stats=TestTargetStats(
+            must_test_count=len(result.must_test),
+            optional_static_count=len(optional_static),
+            skipped_count=len(skipped)
+        )
+    )
+
+@router.get("/{project_id}/test-summary")
+async def get_test_summary(project_id: str):
+    """
+    Returns aggregated test results for the project from cache.
+    Includes function coverage, pass/fail status, and task links.
+    """
+    from app.services.cache_service import CacheService
+    
+    # 1. Get all test targets (to know what we should have)
+    targets_res = ParserService.extract_test_targets(project_id)
+    must_test = targets_res.must_test
+    
+    summary = []
+    
+    for func in must_test:
+        # 2. Query Cache for each function
+        cache_data = CacheService.get_function_data(project_id, func.source_file, func.name)
+        
+        # Build summary item
+        item = {
+            "function_id": func.function_id,
+            "name": func.name,
+            "signature": func.signature,
+            "source_file": func.source_file,
+            "task_id": cache_data.get("latest_task_id"),
+            "last_run": cache_data.get("last_execution_time"),
+            "compile_success": cache_data.get("compile_success"),
+            "passed": cache_data.get("passed", 0),
+            "failed": cache_data.get("failed", 0),
+            "ignored": cache_data.get("ignored", 0),
+            "line_coverage": cache_data.get("line_coverage", 0.0),
+            "branch_coverage": cache_data.get("branch_coverage", 0.0),
+            "status": "unknown"
+        }
+        
+        # Determine Status
+        if not item["task_id"]:
+            item["status"] = "pending"
+        elif item["compile_success"] is False:
+            item["status"] = "compile_error"
+        elif item["failed"] > 0:
+            item["status"] = "failed"
+        elif item["passed"] > 0:
+            item["status"] = "passed"
+        elif item["ignored"] > 0:
+            item["status"] = "ignored"
+        else:
+            item["status"] = "no_tests"
+            
+        summary.append(item)
+        
+    # Sort by coverage descending, then by status
+    summary.sort(key=lambda x: (x["line_coverage"] or 0, x["passed"] or 0), reverse=True)
+    
+    return {
+        "project_id": project_id,
+        "total_functions": len(must_test),
+        "functions": summary
+    }
 
 @router.get("/{project_id}/file")
 async def get_file_source(project_id: str, file_id: str = Query(...)):
@@ -207,5 +291,12 @@ async def get_specific_graph(project_id: str, function_id: str, graph_type: str,
         image_path = await JoernService.generate_pdg_image(project_dir, target_func.name, refresh=refresh)
     else:
         raise HTTPException(status_code=400, detail="Unsupported graph type")
+    
+    # Get mtime for browser caching
+    mtime = 0
+    if image_path:
+        full_path = os.path.join(project_dir, "graphs", image_path)
+        if os.path.exists(full_path):
+            mtime = int(os.path.getmtime(full_path))
 
-    return {"type": graph_type, "image": image_path}
+    return {"type": graph_type, "image": image_path, "mtime": mtime}

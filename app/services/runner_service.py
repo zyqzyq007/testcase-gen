@@ -421,12 +421,34 @@ class RunnerService:
         stdout_t, stderr_t = await proc_t.communicate()
         
         if proc_t.returncode != 0:
+             # Save compilation failure to cache
+             try:
+                 from app.services.cache_service import CacheService
+                 if metadata.get("project_id") and metadata.get("source_file_path") and metadata.get("function_name"):
+                     CacheService.save_function_data(
+                         metadata["project_id"],
+                         metadata["source_file_path"],
+                         metadata["function_name"],
+                         {
+                             "latest_task_id": task_id,
+                             "last_execution_time": str(datetime.now()),
+                             "compile_success": False,
+                             "passed": 0,
+                             "failed": 0,
+                             "ignored": 0,
+                             "line_coverage": 0.0,
+                             "branch_coverage": 0.0
+                         }
+                     )
+             except Exception:
+                 pass
+
              return ExecuteTestResponse(
                 task_id=task_id,
                 compile_success=False,
                 execution_started=False,
-                stderr=f"Target compilation failed:\n{stderr_t.decode()}\n{stdout_t.decode()}"
-            )
+                stderr=f"Target compilation failed:\n{stderr_t.decode(errors='replace')}\n{stdout_t.decode(errors='replace')}"
+             )
 
         # 2. Compile runner & unity
         cmd_compile_others = ["gcc", "-c", "test_runner.c", "unity.c"] + c_flags + include_paths
@@ -434,17 +456,44 @@ class RunnerService:
         stdout_o, stderr_o = await proc_o.communicate()
         
         if proc_o.returncode != 0:
+             # Save Runner/Unity compilation failure to cache
+             try:
+                 from app.services.cache_service import CacheService
+                 if metadata.get("project_id") and metadata.get("source_file_path") and metadata.get("function_name"):
+                     CacheService.save_function_data(
+                         metadata["project_id"],
+                         metadata["source_file_path"],
+                         metadata["function_name"],
+                         {
+                             "latest_task_id": task_id,
+                             "last_execution_time": str(datetime.now()),
+                             "compile_success": False,
+                             "passed": 0,
+                             "failed": 0,
+                             "ignored": 0,
+                             "line_coverage": 0.0,
+                             "branch_coverage": 0.0
+                         }
+                     )
+             except Exception:
+                 pass
+
              return ExecuteTestResponse(
                 task_id=task_id,
                 compile_success=False,
                 execution_started=False,
-                stderr=f"Runner/Unity compilation failed:\n{stderr_o.decode()}\n{stdout_o.decode()}"
-            )
+                stderr=f"Runner/Unity compilation failed:\n{stderr_o.decode(errors='replace')}\n{stdout_o.decode(errors='replace')}"
+             )
 
         # 3. Link
         # Note: gcc -c klib-master/kstring.c produces kstring.o in current dir
+        # Add -lz for zlib support (klib requirement)
         target_obj = os.path.basename(target_file_rel).replace(".c", ".o")
-        cmd_link = ["gcc", "-o", "runner", "test_runner.o", "unity.o", target_obj, "-lgcov", "--coverage", "-lm"]
+        cmd_link = [
+            "gcc", "-o", "runner", 
+            "test_runner.o", "unity.o", target_obj, 
+            "-lgcov", "--coverage", "-lm", "-lz"
+        ]
         
         proc = await asyncio.create_subprocess_exec(
             *cmd_link, 
@@ -455,11 +504,33 @@ class RunnerService:
         stdout, stderr = await proc.communicate()
         
         if proc.returncode != 0:
+            # Save linking failure to cache
+            try:
+                from app.services.cache_service import CacheService
+                if metadata.get("project_id") and metadata.get("source_file_path") and metadata.get("function_name"):
+                    CacheService.save_function_data(
+                        metadata["project_id"],
+                        metadata["source_file_path"],
+                        metadata["function_name"],
+                        {
+                            "latest_task_id": task_id,
+                            "last_execution_time": str(datetime.now()),
+                            "compile_success": False,
+                             "passed": 0,
+                             "failed": 0,
+                             "ignored": 0,
+                             "line_coverage": 0.0,
+                             "branch_coverage": 0.0
+                         }
+                     )
+            except Exception:
+                pass
+
             return ExecuteTestResponse(
                 task_id=task_id,
                 compile_success=False,
                 execution_started=False,
-                stderr=f"Linking failed:\n{stderr.decode()}\n{stdout.decode()}"
+                stderr=f"Linking failed:\n{stderr.decode(errors='replace')}\n{stdout.decode(errors='replace')}"
             )
             
         # 4. Run
@@ -480,11 +551,31 @@ class RunnerService:
             run_stderr = b"Execution timed out (10s limit exceeded)."
         
         # 5. Parse Results
-        output = run_stdout.decode()
+        output = run_stdout.decode(errors='replace') + "\n" + run_stderr.decode(errors='replace')
+        
+        # Check for crash/assertion failure first
+        is_crashed = proc_run.returncode != 0
+        has_assertion_fail = "Assertion" in output and "failed" in output
+        has_segfault = "Segmentation fault" in output
+        
         # Official Unity output: "test_runner.c:20:test_add_basic:PASS"
         passed = output.count(":PASS")
         failed = output.count(":FAIL")
-        total = passed + failed 
+        ignored = output.count(":IGNORE")
+        
+        if proc_run.returncode != 0 and failed == 0:
+             # Try to capture more details about the crash
+             stderr_msg = run_stderr.decode(errors='replace')
+             if not stderr_msg:
+                 stderr_msg = f"Process terminated with signal {-proc_run.returncode}" if proc_run.returncode < 0 else f"Process exited with code {proc_run.returncode}"
+             
+             # Still count as failed
+             failed = 1
+             
+             # Also append to stderr for user visibility
+             run_stderr = (run_stderr.decode(errors='replace') + f"\n[System] Test runner crashed: {stderr_msg}").encode()
+        
+        total = passed + failed + ignored 
         
         # 6. Generate Coverage
         coverage_data = None
@@ -585,12 +676,47 @@ class RunnerService:
         metadata["result"] = {
             "passed": passed,
             "failed": failed,
+            "ignored": ignored,
             "total": total,
             "stdout": output,
             "coverage": coverage_data.model_dump() if coverage_data else None
         }
         with open(os.path.join(task_dir, "metadata.json"), "w") as f:
             json.dump(metadata, f, default=str) # default=str to handle Pydantic/enums if needed
+
+        # Save result to CacheService for persistence
+        try:
+             from app.services.cache_service import CacheService
+             if metadata.get("project_id") and metadata.get("source_file_path") and metadata.get("function_name"):
+                 # Extract line rate for the function
+                 line_rate = 0.0
+                 branch_rate = 0.0
+                 if coverage_data and coverage_data.files:
+                     # Find the target function coverage
+                     for file_cov in coverage_data.files:
+                         for func_cov in file_cov.functions:
+                             if func_cov.name == metadata["function_name"]:
+                                 line_rate = func_cov.line.rate
+                                 branch_rate = func_cov.branch.rate
+                                 break
+                 
+                 CacheService.save_function_data(
+                     metadata["project_id"],
+                     metadata["source_file_path"],
+                     metadata["function_name"],
+                     {
+                         "latest_task_id": task_id,
+                         "last_execution_time": str(datetime.now()),
+                         "compile_success": True,
+                         "passed": passed,
+                         "failed": failed,
+                         "ignored": ignored,
+                         "line_coverage": line_rate,
+                         "branch_coverage": branch_rate
+                     }
+                 )
+        except Exception as e:
+            print(f"Failed to save execution result to cache: {e}")
 
         # Read source code content
         source_code_content = None

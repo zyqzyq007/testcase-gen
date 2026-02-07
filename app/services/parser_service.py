@@ -1,7 +1,8 @@
 import re
 import os
+import base64
 from typing import List, Dict, Any, Optional
-from app.models.project import FunctionInfo
+from app.models.project import FunctionInfo, TestTargetFunctionInfo, ExtractTestTargetsResponse, TestTargetStats
 from app.services.joern_service import JoernService
 from app.services.project_service import ProjectService
 
@@ -90,6 +91,141 @@ class ParserService:
             i += 1
             
         return functions
+
+    @staticmethod
+    def _strip_c_comments(text: str) -> str:
+        text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+        text = re.sub(r'//.*?$', '', text, flags=re.M)
+        return text
+
+    @staticmethod
+    def _is_static_signature(signature: str) -> bool:
+        return bool(re.match(r'^\s*static\b', signature or ""))
+
+    @staticmethod
+    def header_declares_function(header_content: str, function_name: str) -> bool:
+        if not header_content or not function_name:
+            return False
+        clean = ParserService._strip_c_comments(header_content)
+        clean = re.sub(r'^\s*#.*$', '', clean, flags=re.M)
+        pattern = re.compile(r'(^|[^\w])' + re.escape(function_name) + r'\s*\([^;{}]*\)\s*;', flags=re.M)
+        return bool(pattern.search(clean))
+
+    @staticmethod
+    def extract_test_targets(
+        project_id: str,
+        header_strategy: str = "basename"
+    ) -> ExtractTestTargetsResponse:
+        files = ProjectService.list_files(project_id)
+        c_files = [p for p in files if p.lower().endswith(".c")]
+        h_files = [p for p in files if p.lower().endswith(".h")]
+
+        header_content_by_path: Dict[str, str] = {}
+        header_paths_by_basename: Dict[str, List[str]] = {}
+
+        for h_path in h_files:
+            try:
+                header_content_by_path[h_path] = ProjectService.get_file_content(project_id, h_path)
+            except Exception:
+                header_content_by_path[h_path] = ""
+            base = os.path.basename(h_path)
+            header_paths_by_basename.setdefault(base, []).append(h_path)
+
+        must_test: List[TestTargetFunctionInfo] = []
+        optional_static: List[TestTargetFunctionInfo] = []
+        skipped: List[TestTargetFunctionInfo] = []
+
+        for c_path in c_files:
+            file_id = base64.urlsafe_b64encode(c_path.encode()).decode()
+            try:
+                content = ProjectService.get_file_content(project_id, c_path)
+                functions = ParserService.parse_functions(content, file_id)
+            except Exception:
+                continue
+
+            same_basename_header = os.path.splitext(c_path)[0] + ".h"
+            header_path = None
+            if header_strategy == "basename":
+                if same_basename_header in header_content_by_path:
+                    header_path = same_basename_header
+                else:
+                    header_basename = os.path.basename(same_basename_header)
+                    candidates = header_paths_by_basename.get(header_basename, [])
+                    if len(candidates) == 1:
+                        header_path = candidates[0]
+
+            header_content = header_content_by_path.get(header_path, "") if header_path else ""
+
+            for f in functions:
+                is_static = ParserService._is_static_signature(f.signature)
+                if is_static:
+                    optional_static.append(TestTargetFunctionInfo(
+                        function_id=f.function_id,
+                        name=f.name,
+                        start_line=f.start_line,
+                        end_line=f.end_line,
+                        signature=f.signature,
+                        source_file=c_path,
+                        category="internal_static",
+                        header_file=header_path,
+                        declared_in_header=False
+                    ))
+                    continue
+
+                if not header_path:
+                    skipped.append(TestTargetFunctionInfo(
+                        function_id=f.function_id,
+                        name=f.name,
+                        start_line=f.start_line,
+                        end_line=f.end_line,
+                        signature=f.signature,
+                        source_file=c_path,
+                        category="skipped",
+                        header_file=None,
+                        declared_in_header=False,
+                        reason="no_corresponding_header"
+                    ))
+                    continue
+
+                declared = ParserService.header_declares_function(header_content, f.name)
+                if declared:
+                    must_test.append(TestTargetFunctionInfo(
+                        function_id=f.function_id,
+                        name=f.name,
+                        start_line=f.start_line,
+                        end_line=f.end_line,
+                        signature=f.signature,
+                        source_file=c_path,
+                        category="external_linkage",
+                        header_file=header_path,
+                        declared_in_header=True
+                    ))
+                else:
+                    skipped.append(TestTargetFunctionInfo(
+                        function_id=f.function_id,
+                        name=f.name,
+                        start_line=f.start_line,
+                        end_line=f.end_line,
+                        signature=f.signature,
+                        source_file=c_path,
+                        category="skipped",
+                        header_file=header_path,
+                        declared_in_header=False,
+                        reason="not_declared_in_header"
+                    ))
+
+        stats = TestTargetStats(
+            must_test_count=len(must_test),
+            optional_static_count=len(optional_static),
+            skipped_count=len(skipped)
+        )
+        return ExtractTestTargetsResponse(
+            project_id=project_id,
+            must_test=must_test,
+            optional_static=optional_static,
+            skipped=skipped,
+            stats=stats
+        )
 
     @staticmethod
     def generate_code_graph(function_code: str) -> Dict[str, Any]:

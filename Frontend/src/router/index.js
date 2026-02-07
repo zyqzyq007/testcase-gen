@@ -3,6 +3,7 @@ import UploadView from '../views/UploadView.vue'
 import BrowseView from '../views/BrowseView.vue'
 import GenerateView from '../views/GenerateView.vue'
 import ResultView from '../views/ResultView.vue'
+import ResultDashboardView from '../views/ResultDashboardView.vue'
 import { useAppStore } from '../store'
 
 const routes = [
@@ -39,6 +40,16 @@ const routes = [
     beforeEnter: (to, from, next) => {
       const store = useAppStore()
       if (!store.taskId) next('/')
+      else next()
+    }
+  },
+  {
+    path: '/dashboard',
+    name: 'dashboard',
+    component: ResultDashboardView,
+    beforeEnter: (to, from, next) => {
+      const store = useAppStore()
+      if (!store.projectId) next('/')
       else next()
     }
   }

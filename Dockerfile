@@ -1,5 +1,13 @@
 # Base image
-FROM python:3.10-slim-bookworm
+FROM node:18-bookworm-slim AS frontend-builder
+
+WORKDIR /app/Frontend
+COPY Frontend/package.json Frontend/package-lock.json ./
+RUN npm ci
+COPY Frontend/ ./
+RUN npm run build
+
+FROM python:3.10-slim-bookworm AS runtime
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -9,14 +17,11 @@ ENV PATH="${JOERN_HOME}:${PATH}"
 
 # Install system dependencies
 # - OpenJDK 17 for Joern
-# - Node.js & npm for Frontend
 # - GCC for compiling C tests
 # - Graphviz for generating graphs
 # - curl, unzip, wget for downloading tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openjdk-17-jdk \
-    nodejs \
-    npm \
     gcc \
     graphviz \
     curl \
@@ -39,20 +44,16 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Frontend dependencies
-COPY Frontend/package.json Frontend/package-lock.json ./Frontend/
-RUN cd Frontend && npm install
-
 # Copy project files
 COPY . .
+COPY --from=frontend-builder /app/Frontend/dist ./Frontend/dist
 
 # Make entrypoint executable
-RUN chmod +x docker-entrypoint.sh
+RUN chmod +x docker-entrypoint.prod.sh
 
 # Expose ports
-# 8000: Backend (FastAPI)
-# 5173: Frontend (Vite)
-EXPOSE 8000 5173
+# 8000: Backend (FastAPI + Static Frontend)
+EXPOSE 8000
 
 # Start services
-ENTRYPOINT ["./docker-entrypoint.sh"]
+ENTRYPOINT ["./docker-entrypoint.prod.sh"]

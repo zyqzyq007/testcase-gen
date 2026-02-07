@@ -7,9 +7,18 @@
           <FolderTree class="w-4 h-4 text-primary-600" />
           项目结构
         </h2>
-        <button @click="fetchStructure" class="p-1 hover:bg-slate-100 rounded text-slate-500">
-          <RotateCw class="w-3.5 h-3.5" :class="{ 'animate-spin': loading }" />
-        </button>
+        <div class="flex gap-1">
+           <button 
+            @click="triggerBatchTest" 
+            class="p-1 bg-primary-50 text-primary-600 hover:bg-primary-100 rounded transition-colors"
+            title="执行全量自动测试"
+           >
+             <Zap class="w-3.5 h-3.5" />
+           </button>
+           <button @click="fetchStructure" class="p-1 hover:bg-slate-100 rounded text-slate-500">
+             <RotateCw class="w-3.5 h-3.5" :class="{ 'animate-spin': loading }" />
+           </button>
+        </div>
       </div>
       
       <div class="flex-1 overflow-y-auto p-2">
@@ -82,6 +91,13 @@
         <span class="text-lg">生成测试用例</span>
       </button>
     </div>
+
+    <!-- Batch Test Overlay -->
+    <BatchTestOverlay 
+      ref="batchTestOverlay" 
+      :project-id="store.projectId" 
+      :concurrency="4"
+    />
   </div>
 </template>
 
@@ -93,9 +109,10 @@ export default {
 
 <script setup>
 import { ref, onMounted, computed, nextTick, h, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useAppStore } from '../store'
 import axios from 'axios'
+import BatchTestOverlay from '../components/BatchTestOverlay.vue'
 import hljs from 'highlight.js'
 import { 
   FolderTree, FileCode, RotateCw, ChevronRight, 
@@ -103,7 +120,10 @@ import {
 } from 'lucide-vue-next'
 
 const router = useRouter()
+const route = useRoute()
 const store = useAppStore()
+
+const batchTestOverlay = ref(null)
 
 const loading = ref(false)
 const structure = ref(null)
@@ -113,6 +133,12 @@ const selectedFile = ref(null)
 const fileLoading = ref(false)
 const fileContent = ref('')
 const codeContainer = ref(null)
+
+const triggerBatchTest = () => {
+  if (batchTestOverlay.value) {
+    batchTestOverlay.value.start()
+  }
+}
 
 // FileTreeNode Component (Internal)
 const FileTreeNode = {
@@ -268,6 +294,32 @@ const fetchStructure = async () => {
     const response = await axios.get(`/api/project/${store.projectId}/structure`)
     structure.value = response.data
     treeData.value = buildTree(structure.value.files)
+    
+    // Check for query params to auto-select
+    const targetPath = route.query.file
+    if (targetPath) {
+       // Need to find the node with this path.
+       // The path in query might be relative "klib-master/kmath.c" or similar.
+       // structure.files contains objects with { path: "..." }
+       // Let's try to match it.
+       const targetFile = structure.value.files.find(f => f.path === targetPath || f.path.endsWith(`/${targetPath}`))
+       
+       if (targetFile) {
+           await selectFile(targetFile)
+           
+           // If we also have a functionId (from store or query?), we can highlight it.
+           // store.functionId is already set by ResultDashboardView before navigation.
+           if (store.functionId) {
+               const func = targetFile.functions.find(f => f.function_id === store.functionId)
+               if (func) {
+                   nextTick(() => {
+                        const el = document.getElementById(`line-${func.start_line}`)
+                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                   })
+               }
+           }
+       }
+    }
   } catch (error) {
     console.error('Fetch structure failed:', error)
   } finally {

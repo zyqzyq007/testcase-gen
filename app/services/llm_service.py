@@ -80,7 +80,8 @@ Requirements:
 8. Output ONLY the C code for the test file. Wrap it in a ```c block.
 9. Ensure the code compiles with standard Unity setup and includes necessary standard headers like <math.h> or <float.h> if the function uses them.
 """
-        print(f"DEBUG: LLM Prompt:\n{prompt}")
+        if os.getenv("LLM_DEBUG_PROMPT") == "1":
+            print(f"DEBUG: LLM Prompt:\n{prompt}")
         if DEEPSEEK_API_KEY == "sk-placeholder":
             mock_code = LLMService._generate_mock_test(function_code)
             for char in mock_code:
@@ -266,7 +267,8 @@ Requirements:
 8. Output ONLY the C code for the test file. Wrap it in a ```c block.
 9. Ensure the code compiles with standard Unity setup and includes necessary standard headers like <math.h> or <float.h> if the function uses them.
 """
-        print(f"DEBUG: LLM Prompt:\n{prompt}")
+        if os.getenv("LLM_DEBUG_PROMPT") == "1":
+            print(f"DEBUG: LLM Prompt:\n{prompt}")
         if DEEPSEEK_API_KEY == "sk-placeholder":
             return LLMService._generate_mock_test(function_code)
 

@@ -102,87 +102,75 @@
               </div>
 
               <!-- Graph Image -->
-              <div v-if="graphItemReady.call || graphItemLoading.call" class="space-y-3">
-                <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                  <span class="w-1 h-3 bg-primary-500 rounded-full"></span>
-                  调用关系可视化
+              <div v-if="graphItemReady.call || graphItemLoading.call" class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm relative min-h-[300px] flex items-center justify-center">
+                <h3 class="absolute top-4 left-4 font-bold text-slate-700 flex items-center gap-2">
+                  <Network class="w-4 h-4 text-primary-500" />
+                  Call Graph (调用图)
                 </h3>
-                <div class="bg-white p-2 rounded-lg border border-slate-200 shadow-inner overflow-auto relative min-h-[100px] max-h-[400px] flex items-start justify-center">
-                  <div v-if="graphItemLoading.call" class="absolute inset-0 bg-white/80 z-10 flex flex-col items-center justify-center space-y-2">
-                    <RefreshCw class="w-5 h-5 text-primary-600 animate-spin" />
-                    <p class="text-[8px] font-bold text-slate-400 uppercase">生成中...</p>
-                  </div>
-                  <img 
-                    v-if="graphItemReady.call"
-                    :src="`/api/project/${store.projectId}/graph/${codeGraph.graph_image}?t=${graphTimestamp}`" 
-                    class="max-w-full h-auto rounded hover:brightness-95 transition-all cursor-zoom-in"
-                    alt="Call Graph"
-                    @click="openImage(`/api/project/${store.projectId}/graph/${codeGraph.graph_image}?t=${graphTimestamp}`)"
-                  />
+                <div v-if="graphItemLoading.call" class="absolute inset-0 flex items-center justify-center bg-white/80 z-10">
+                   <RefreshCw class="w-8 h-8 animate-spin text-primary-500" />
                 </div>
+                <img 
+                  v-if="codeGraph.graph_image"
+                  :src="`/api/project/${store.projectId}/graph/${codeGraph.graph_image}?t=${codeGraph.graph_mtime || 0}`" 
+                  class="max-w-full max-h-[600px] object-contain cursor-zoom-in"
+                  @click="openImage(`/api/project/${store.projectId}/graph/${codeGraph.graph_image}?t=${codeGraph.graph_mtime || 0}`)"
+                />
+                <div v-else-if="!graphItemLoading.call" class="text-slate-400 text-sm">暂无数据</div>
               </div>
 
               <!-- AST Image -->
-              <div v-if="graphItemReady.ast || graphItemLoading.ast" class="space-y-3">
-                <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                  <span class="w-1 h-3 bg-primary-500 rounded-full"></span>
+              <div v-if="graphItemReady.ast || graphItemLoading.ast" class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm relative min-h-[300px] flex items-center justify-center">
+                <h3 class="absolute top-4 left-4 font-bold text-slate-700 flex items-center gap-2">
+                  <GitBranch class="w-4 h-4 text-purple-500" />
                   抽象语法树 (AST)
                 </h3>
-                <div class="bg-white p-2 rounded-lg border border-slate-200 shadow-inner overflow-auto relative min-h-[100px] max-h-[400px] flex items-start justify-center">
-                  <div v-if="graphItemLoading.ast" class="absolute inset-0 bg-white/80 z-10 flex flex-col items-center justify-center space-y-2">
-                    <RefreshCw class="w-5 h-5 text-primary-600 animate-spin" />
-                    <p class="text-[8px] font-bold text-slate-400 uppercase">生成中...</p>
-                  </div>
-                  <img 
-                    v-if="graphItemReady.ast"
-                    :src="`/api/project/${store.projectId}/graph/${codeGraph.ast_image}?t=${graphTimestamp}`" 
-                    class="max-w-full h-auto rounded hover:brightness-95 transition-all cursor-zoom-in"
-                    alt="AST Graph"
-                    @click="openImage(`/api/project/${store.projectId}/graph/${codeGraph.ast_image}?t=${graphTimestamp}`)"
-                  />
+                <div v-if="graphItemLoading.ast" class="absolute inset-0 flex items-center justify-center bg-white/80 z-10">
+                   <RefreshCw class="w-8 h-8 animate-spin text-purple-500" />
                 </div>
+                <img 
+                  v-if="codeGraph.ast_image"
+                  :src="`/api/project/${store.projectId}/graph/${codeGraph.ast_image}?t=${codeGraph.ast_mtime || 0}`" 
+                  class="max-w-full max-h-[600px] object-contain cursor-zoom-in"
+                  @click="openImage(`/api/project/${store.projectId}/graph/${codeGraph.ast_image}?t=${codeGraph.ast_mtime || 0}`)"
+                />
+                <div v-else-if="!graphItemLoading.ast" class="text-slate-400 text-sm">暂无数据</div>
               </div>
 
               <!-- CFG Image -->
-              <div v-if="graphItemReady.cfg || graphItemLoading.cfg" class="space-y-3">
-                <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                  <span class="w-1 h-3 bg-primary-500 rounded-full"></span>
+              <div v-if="graphItemReady.cfg || graphItemLoading.cfg" class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm relative min-h-[300px] flex items-center justify-center">
+                <h3 class="absolute top-4 left-4 font-bold text-slate-700 flex items-center gap-2">
+                  <GitCommit class="w-4 h-4 text-blue-500" />
                   控制流图 (CFG)
                 </h3>
-                <div class="bg-white p-2 rounded-lg border border-slate-200 shadow-inner overflow-auto relative min-h-[100px] max-h-[400px] flex items-start justify-center">
-                  <div v-if="graphItemLoading.cfg" class="absolute inset-0 bg-white/80 z-10 flex flex-col items-center justify-center space-y-2">
-                    <RefreshCw class="w-5 h-5 text-primary-600 animate-spin" />
-                    <p class="text-[8px] font-bold text-slate-400 uppercase">生成中...</p>
-                  </div>
-                  <img 
-                    v-if="graphItemReady.cfg"
-                    :src="`/api/project/${store.projectId}/graph/${codeGraph.cfg_image}?t=${graphTimestamp}`" 
-                    class="max-w-full h-auto rounded hover:brightness-95 transition-all cursor-zoom-in"
-                    alt="CFG Graph"
-                    @click="openImage(`/api/project/${store.projectId}/graph/${codeGraph.cfg_image}?t=${graphTimestamp}`)"
-                  />
+                <div v-if="graphItemLoading.cfg" class="absolute inset-0 flex items-center justify-center bg-white/80 z-10">
+                   <RefreshCw class="w-8 h-8 animate-spin text-blue-500" />
                 </div>
+                <img 
+                  v-if="codeGraph.cfg_image"
+                  :src="`/api/project/${store.projectId}/graph/${codeGraph.cfg_image}?t=${codeGraph.cfg_mtime || 0}`" 
+                  class="max-w-full max-h-[600px] object-contain cursor-zoom-in"
+                  @click="openImage(`/api/project/${store.projectId}/graph/${codeGraph.cfg_image}?t=${codeGraph.cfg_mtime || 0}`)"
+                />
+                <div v-else-if="!graphItemLoading.cfg" class="text-slate-400 text-sm">暂无数据</div>
               </div>
 
               <!-- PDG Image -->
-              <div v-if="graphItemReady.pdg || graphItemLoading.pdg" class="space-y-3">
-                <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                  <span class="w-1 h-3 bg-primary-500 rounded-full"></span>
+              <div v-if="graphItemReady.pdg || graphItemLoading.pdg" class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm relative min-h-[300px] flex items-center justify-center">
+                <h3 class="absolute top-4 left-4 font-bold text-slate-700 flex items-center gap-2">
+                  <GitMerge class="w-4 h-4 text-green-500" />
                   程序依赖图 (PDG)
                 </h3>
-                <div class="bg-white p-2 rounded-lg border border-slate-200 shadow-inner overflow-auto relative min-h-[100px] max-h-[400px] flex items-start justify-center">
-                  <div v-if="graphItemLoading.pdg" class="absolute inset-0 bg-white/80 z-10 flex flex-col items-center justify-center space-y-2">
-                    <RefreshCw class="w-5 h-5 text-primary-600 animate-spin" />
-                    <p class="text-[8px] font-bold text-slate-400 uppercase">生成中...</p>
-                  </div>
-                  <img 
-                    v-if="graphItemReady.pdg"
-                    :src="`/api/project/${store.projectId}/graph/${codeGraph.pdg_image}?t=${graphTimestamp}`" 
-                    class="max-w-full h-auto rounded hover:brightness-95 transition-all cursor-zoom-in"
-                    alt="PDG Graph"
-                    @click="openImage(`/api/project/${store.projectId}/graph/${codeGraph.pdg_image}?t=${graphTimestamp}`)"
-                  />
+                <div v-if="graphItemLoading.pdg" class="absolute inset-0 flex items-center justify-center bg-white/80 z-10">
+                   <RefreshCw class="w-8 h-8 animate-spin text-green-500" />
                 </div>
+                <img 
+                  v-if="codeGraph.pdg_image"
+                  :src="`/api/project/${store.projectId}/graph/${codeGraph.pdg_image}?t=${codeGraph.pdg_mtime || 0}`" 
+                  class="max-w-full max-h-[600px] object-contain cursor-zoom-in"
+                  @click="openImage(`/api/project/${store.projectId}/graph/${codeGraph.pdg_image}?t=${codeGraph.pdg_mtime || 0}`)"
+                />
+                <div v-else-if="!graphItemLoading.pdg" class="text-slate-400 text-sm">暂无数据</div>
               </div>
             </div>
             <div v-else class="text-center py-12 text-slate-300 text-sm font-medium italic">
@@ -360,7 +348,8 @@ const selectedFramework = ref('unity')
 const generatedCode = ref('')
 const functionIntent = ref('')
 const intentLoading = ref(false)
-const graphTimestamp = ref(Date.now())
+// We don't need a global graphTimestamp anymore, as each image will have its own mtime
+// const graphTimestamp = ref(Date.now())
 
 const highlightedGeneratedCode = computed(() => {
   if (!generatedCode.value) return ''
@@ -453,17 +442,22 @@ const fetchCodeGraph = async (refresh = false) => {
     codeGraph.value = { ...codeGraph.value, ...metadata }
     
     if (refresh) {
-      graphTimestamp.value = Date.now()
+      // graphTimestamp.value = Date.now()
     }
 
     // 2. Fetch specific graphs in parallel
     const graphTypes = ['call', 'ast', 'cfg', 'pdg']
     graphTypes.forEach(type => {
+      graphItemLoading.value[type] = true
       axios.get(`/api/project/${store.projectId}/function/${store.functionId}/graph/${type}`, {
         params: { refresh: refresh }
       }).then(res => {
         const key = type === 'call' ? 'graph_image' : `${type}_image`
+        const mtimeKey = type === 'call' ? 'graph_mtime' : `${type}_mtime`
+        
         codeGraph.value[key] = res.data.image
+        codeGraph.value[mtimeKey] = res.data.mtime // Use mtime from backend
+        
         graphItemReady.value[type] = true
       }).catch(err => {
         console.error(`Failed to fetch ${type} graph:`, err)
