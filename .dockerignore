@@ -3,19 +3,19 @@
 .gitignore
 
 # Python
-__pycache__
+__pycache__/
 *.py[cod]
 *$py.class
 venv/
-.env
 
-# Node
+# Frontend
 Frontend/node_modules/
 Frontend/dist/
 
-# Project Specific
+# Joern / Project Specific
 workspaces/
 workspace/
 cpg.bin
 *.log
-.DS_Store
+nohup.out
+# joern-cli.zip (Commented out to allow copying into image)

@@ -23,8 +23,8 @@ app.add_middleware(
 app.include_router(testcase.router)
 app.include_router(project.router)
 
-@app.get("/")
-async def root():
+@app.get("/api/health")
+async def health_check():
     return {"message": "C Unit Test Generator API is running"}
 
 if os.path.isdir("Frontend/dist"):
