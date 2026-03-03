@@ -14,14 +14,14 @@
           <button @click="fetchSummary" class="p-2 text-slate-500 hover:bg-slate-100 rounded transition-colors" title="刷新">
             <RotateCw class="w-5 h-5" :class="{'animate-spin': loading}" />
           </button>
-          <button @click="router.push('/browse')" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg transition-colors text-sm">
-            返回代码浏览
+          <button @click="router.push('/browse')" class="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg transition-colors text-sm">
+            进入项目浏览
           </button>
         </div>
       </div>
 
       <!-- Stats Cards -->
-      <div class="grid grid-cols-5 gap-4">
+      <div class="grid grid-cols-4 gap-4">
         <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
           <div class="text-slate-500 text-xs font-bold uppercase mb-1">总被测函数</div>
           <div class="text-2xl font-bold text-slate-900">{{ stats.total }}</div>
@@ -33,10 +33,6 @@
         <div class="bg-red-50 border border-red-100 rounded-xl p-4 shadow-sm">
           <div class="text-red-600 text-xs font-bold uppercase mb-1">失败</div>
           <div class="text-2xl font-bold text-red-700">{{ stats.failed }}</div>
-        </div>
-        <div class="bg-slate-100 border border-slate-200 rounded-xl p-4 shadow-sm">
-          <div class="text-slate-600 text-xs font-bold uppercase mb-1">跳过 (Ignored)</div>
-          <div class="text-2xl font-bold text-slate-700">{{ stats.ignored }}</div>
         </div>
         <div class="bg-orange-50 border border-orange-100 rounded-xl p-4 shadow-sm">
           <div class="text-orange-600 text-xs font-bold uppercase mb-1">编译错误</div>
@@ -113,8 +109,7 @@
                     :class="getStatusClass(func.status)"
                   >
                     <CheckCircle2 v-if="func.status === 'passed'" class="w-3 h-3" />
-                    <XCircle v-else-if="func.status === 'failed'" class="w-3 h-3" />
-                    <Ban v-else-if="func.status === 'ignored'" class="w-3 h-3" />
+                    <XCircle v-else-if="func.status === 'failed' || func.status === 'ignored'" class="w-3 h-3" />
                     <AlertTriangle v-else-if="func.status === 'compile_error'" class="w-3 h-3" />
                     <Clock v-else class="w-3 h-3" />
                     {{ getStatusLabel(func.status) }}
@@ -153,10 +148,10 @@ const functions = ref([])
 const stats = computed(() => {
   const total = functions.value.length
   const passed = functions.value.filter(f => f.status === 'passed').length
-  const failed = functions.value.filter(f => f.status === 'failed').length
   const ignored = functions.value.filter(f => f.status === 'ignored').length
+  const failed = functions.value.filter(f => f.status === 'failed').length + ignored
   const compileError = functions.value.filter(f => f.status === 'compile_error').length
-  return { total, passed, failed, ignored, compileError }
+  return { total, passed, failed, compileError }
 })
 
 const fetchSummary = async () => {
@@ -191,7 +186,7 @@ const getStatusClass = (status) => {
   const map = {
     passed: 'bg-green-100 text-green-700',
     failed: 'bg-red-100 text-red-700',
-    ignored: 'bg-slate-200 text-slate-700',
+    ignored: 'bg-red-100 text-red-700',
     compile_error: 'bg-orange-100 text-orange-700',
     pending: 'bg-slate-100 text-slate-500',
     no_tests: 'bg-slate-100 text-slate-500',
@@ -204,7 +199,7 @@ const getStatusLabel = (status) => {
   const map = {
     passed: '通过',
     failed: '失败',
-    ignored: '已跳过',
+    ignored: '失败',
     compile_error: '编译错误',
     pending: '等待中',
     no_tests: '无测试',

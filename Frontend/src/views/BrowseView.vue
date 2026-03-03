@@ -96,7 +96,7 @@
     <BatchTestOverlay 
       ref="batchTestOverlay" 
       :project-id="store.projectId" 
-      :concurrency="4"
+      :concurrency="16"
     />
   </div>
 </template>

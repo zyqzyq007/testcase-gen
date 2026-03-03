@@ -6,7 +6,7 @@
           <Zap class="w-5 h-5 text-yellow-500" />
           全量自动测试进度
         </h3>
-        <button v-if="isFinished" @click="close" class="p-1 hover:bg-slate-100 rounded-full">
+        <button @click="handleClose" class="p-1 hover:bg-slate-100 rounded-full transition-colors">
           <X class="w-5 h-5 text-slate-400" />
         </button>
       </div>
@@ -14,11 +14,15 @@
       <!-- Main Progress Bar -->
       <div class="space-y-2">
          <div class="flex justify-between text-sm text-slate-600 font-bold">
-            <span>总进度</span>
+            <span>{{ isCancelled ? '测试已停止' : '总进度' }}</span>
             <span>{{ totalProgress }}%</span>
          </div>
          <div class="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
-            <div class="bg-primary-600 h-full transition-all duration-500 ease-out" :style="{ width: totalProgress + '%' }"></div>
+            <div 
+              class="h-full transition-all duration-500 ease-out" 
+              :class="isCancelled ? 'bg-slate-400' : 'bg-primary-600'"
+              :style="{ width: totalProgress + '%' }"
+            ></div>
          </div>
          <div class="text-xs text-slate-400 text-right font-mono">{{ batchStatus.completed }}/{{ batchStatus.total }} 任务</div>
       </div>
@@ -56,17 +60,36 @@
       </div>
 
       <!-- Warning -->
-       <div v-if="batchStatus.compileError > (batchStatus.total * 0.3) && batchStatus.total > 5" class="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-xs text-yellow-700 flex items-start gap-2">
+       <div v-if="isCancelled" class="p-3 bg-slate-100 border border-slate-300 rounded-lg text-sm text-slate-700 flex items-start gap-2">
+          <AlertTriangle class="w-4 h-4 shrink-0 mt-0.5" />
+          <span>测试已手动停止。已完成的 {{ batchStatus.completed }} 个测试结果已保存。</span>
+       </div>
+       <div v-else-if="batchStatus.compileError > (batchStatus.total * 0.3) && batchStatus.total > 5" class="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-xs text-yellow-700 flex items-start gap-2">
           <AlertTriangle class="w-4 h-4 shrink-0 mt-0.5" />
           <span>检测到较多编译/链接失败 (>30%)，建议检查项目是否缺少依赖（如 zlib/openssl）。</span>
        </div>
 
        <!-- Actions -->
-       <div v-if="isFinished" class="flex justify-end gap-3 pt-2">
-          <button @click="close" class="px-4 py-2 text-slate-600 hover:bg-slate-100 font-bold rounded-lg transition-colors">
+       <div class="flex justify-end gap-3 pt-2">
+          <button 
+            v-if="!isFinished && batchStage > 0" 
+            @click="cancelTest" 
+            class="px-4 py-2 text-red-600 hover:bg-red-50 font-bold rounded-lg transition-colors border border-red-200"
+          >
+            停止测试
+          </button>
+          <button 
+            v-if="isFinished || isCancelled" 
+            @click="close" 
+            class="px-4 py-2 text-slate-600 hover:bg-slate-100 font-bold rounded-lg transition-colors"
+          >
             关闭
           </button>
-          <button @click="goToDashboard" class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white font-bold rounded-lg transition-colors shadow-lg flex items-center gap-2">
+          <button 
+            v-if="isFinished" 
+            @click="goToDashboard" 
+            class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white font-bold rounded-lg transition-colors shadow-lg flex items-center gap-2"
+          >
             <LayoutDashboard class="w-4 h-4" />
             前往结果总览
           </button>
@@ -85,7 +108,7 @@ const props = defineProps({
   projectId: String,
   concurrency: {
     type: Number,
-    default: 4
+    default: 16
   }
 })
 
@@ -93,6 +116,7 @@ const emit = defineEmits(['close'])
 const router = useRouter()
 
 const visible = ref(false)
+const isCancelled = ref(false)
 const batchStage = ref(0) // 0: Idle, 1: Parsing, 2: Running
 const batchStatus = ref({
   total: 0,
@@ -124,24 +148,58 @@ class TaskQueue {
     this.concurrency = concurrency
     this.running = 0
     this.queue = []
+    this.cancelled = false
+    this.abortControllers = new Set() // Track all active requests
+  }
+
+  cancel() {
+    this.cancelled = true
+    this.queue = [] // Clear pending tasks
+    // Abort all active HTTP requests
+    this.abortControllers.forEach(controller => {
+      try {
+        controller.abort()
+      } catch (e) {
+        console.log('Abort controller already aborted', e)
+      }
+    })
+    this.abortControllers.clear()
+  }
+
+  createAbortController() {
+    const controller = new AbortController()
+    this.abortControllers.add(controller)
+    return controller
+  }
+
+  removeAbortController(controller) {
+    this.abortControllers.delete(controller)
   }
 
   add(task) {
     return new Promise((resolve, reject) => {
+      if (this.cancelled) {
+        reject(new Error('Task cancelled'))
+        return
+      }
       this.queue.push({ task, resolve, reject })
       this.process()
     })
   }
 
   async process() {
-    if (this.running >= this.concurrency || this.queue.length === 0) return
+    if (this.cancelled || this.running >= this.concurrency || this.queue.length === 0) return
     
     this.running++
     const { task, resolve, reject } = this.queue.shift()
     
     try {
-      const result = await task()
-      resolve(result)
+      if (this.cancelled) {
+        reject(new Error('Task cancelled'))
+      } else {
+        const result = await task()
+        resolve(result)
+      }
     } catch (e) {
       reject(e)
     } finally {
@@ -151,10 +209,13 @@ class TaskQueue {
   }
 }
 
+let currentQueue = null
+
 const start = async () => {
   if (!props.projectId) return
   visible.value = true
   batchStage.value = 1
+  isCancelled.value = false
   
   // Reset stats
   batchStatus.value = {
@@ -176,24 +237,32 @@ const start = async () => {
 
     batchStage.value = 2 // Running
     const queue = new TaskQueue(props.concurrency)
+    currentQueue = queue
     const promises = []
 
     // 2. Queue Generate & Execute Tasks
     for (const func of mustTest) {
       const p = queue.add(async () => {
+         const abortController = queue.createAbortController()
          try {
             // Generate
             const genRes = await axios.post('/api/testcase/generate', {
               project_id: props.projectId,
               function_id: func.function_id,
               test_framework: 'unity'
+            }, {
+              signal: abortController.signal
             })
             batchStatus.value.generated++
             
             const taskId = genRes.data.task_id
             
             // Execute
-            const execRes = await axios.post('/api/testcase/execute', { task_id: taskId })
+            const execRes = await axios.post('/api/testcase/execute', { 
+              task_id: taskId 
+            }, {
+              signal: abortController.signal
+            })
             batchStatus.value.executed++
             
             const result = execRes.data
@@ -207,22 +276,55 @@ const start = async () => {
                batchStatus.value.compileError++
             }
          } catch (e) {
-            console.error(`Task failed for ${func.name}:`, e)
-            batchStatus.value.failed++
+            if (e.name === 'CanceledError' || e.message === 'Task cancelled' || e.code === 'ERR_CANCELED') {
+              // Request was cancelled, don't count as failure
+              console.log(`Task cancelled for ${func.name}`)
+            } else {
+              console.error(`Task failed for ${func.name}:`, e)
+              batchStatus.value.failed++
+            }
          } finally {
+            queue.removeAbortController(abortController)
             batchStatus.value.completed++
          }
       })
       promises.push(p)
     }
 
-    await Promise.all(promises)
-    batchStage.value = 3 // Done
+    await Promise.allSettled(promises) // Use allSettled to handle cancellations
+    
+    if (!isCancelled.value) {
+      batchStage.value = 3 // Done
+    }
 
   } catch (e) {
     console.error('Batch testing error:', e)
-    alert('全量测试过程中发生错误')
-    visible.value = false
+    if (!isCancelled.value) {
+      alert('全量测试过程中发生错误')
+    }
+  } finally {
+    currentQueue = null
+  }
+}
+
+const cancelTest = () => {
+  if (confirm('确定要停止全量测试吗？已完成的测试结果将被保留。')) {
+    isCancelled.value = true
+    if (currentQueue) {
+      currentQueue.cancel()
+    }
+    batchStage.value = 3 // Mark as finished
+  }
+}
+
+const handleClose = () => {
+  if (!isFinished.value && !isCancelled.value && batchStage.value > 0) {
+    if (confirm('测试正在进行中，确定要关闭吗？已完成的测试结果将被保留。')) {
+      cancelTest()
+      close()
+    }
+  } else {
+    close()
   }
 }
 

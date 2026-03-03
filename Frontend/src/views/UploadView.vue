@@ -234,7 +234,7 @@ const projects = ref([])
 
 // Batch Testing State
 const enableBatchTest = ref(false)
-const concurrency = ref(4)
+const concurrency = ref(16)
 const batchTesting = ref(false)
 const batchStage = ref(0) // 0: Idle, 1: Parsing, 2: Running
 const batchStatus = ref({
@@ -437,7 +437,7 @@ const fetchProjects = async () => {
 
 const selectProject = (project) => {
   store.setProject(project.project_id, project.project_name)
-  router.push('/browse')
+  router.push('/dashboard')
 }
 
 const deleteProject = async (e, project) => {
