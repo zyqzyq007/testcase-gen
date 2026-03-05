@@ -164,13 +164,14 @@ async def get_file_source(project_id: str, file_id: str = Query(...)):
 async def get_project_graph(project_id: str, image_name: str):
     """
     Serves a generated graph image for a project.
+    图片生成在本工具私有可写目录中，不在只读的共享卷里。
     """
-    project_dir = ProjectService.get_project_path(project_id)
-    image_path = os.path.join(project_dir, "graphs", image_name)
-    
+    local_dir = ProjectService.get_local_project_dir(project_id)
+    image_path = os.path.join(local_dir, "graphs", image_name)
+
     if not os.path.exists(image_path):
         raise HTTPException(status_code=404, detail="Graph image not found")
-        
+
     return FileResponse(image_path)
 
 @router.get("/{project_id}/function/{function_id}")
@@ -274,28 +275,30 @@ async def get_specific_graph(project_id: str, function_id: str, graph_type: str,
     if not target_func:
         raise HTTPException(status_code=404, detail="Function not found")
 
-    project_dir = ProjectService.get_project_path(project_id)
-    cpg_path = os.path.join(project_dir, "cpg.bin")
-    
-    # Ensure CPG exists
-    await JoernService.parse_project(project_dir, cpg_path)
+    # 源码路径（可能只读），图谱/CPG 写到本工具私有可写目录
+    source_dir = ProjectService.get_project_path(project_id)
+    local_dir = ProjectService.get_local_project_dir(project_id)
+    cpg_path = os.path.join(local_dir, "cpg.bin")
+
+    # Joern 解析源码目录，但输出到可写的 local_dir
+    await JoernService.parse_project(source_dir, cpg_path)
 
     image_path = None
     if graph_type == "call":
-        image_path = await JoernService.generate_graph_image(project_dir, target_func.name, refresh=refresh)
+        image_path = await JoernService.generate_graph_image(local_dir, target_func.name, refresh=refresh)
     elif graph_type == "ast":
-        image_path = await JoernService.generate_ast_image(project_dir, target_func.name, refresh=refresh)
+        image_path = await JoernService.generate_ast_image(local_dir, target_func.name, refresh=refresh)
     elif graph_type == "cfg":
-        image_path = await JoernService.generate_cfg_image(project_dir, target_func.name, refresh=refresh)
+        image_path = await JoernService.generate_cfg_image(local_dir, target_func.name, refresh=refresh)
     elif graph_type == "pdg":
-        image_path = await JoernService.generate_pdg_image(project_dir, target_func.name, refresh=refresh)
+        image_path = await JoernService.generate_pdg_image(local_dir, target_func.name, refresh=refresh)
     else:
         raise HTTPException(status_code=400, detail="Unsupported graph type")
-    
+
     # Get mtime for browser caching
     mtime = 0
     if image_path:
-        full_path = os.path.join(project_dir, "graphs", image_path)
+        full_path = os.path.join(local_dir, "graphs", image_path)
         if os.path.exists(full_path):
             mtime = int(os.path.getmtime(full_path))
 

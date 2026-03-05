@@ -6,7 +6,8 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 
 CACHE_DIR = os.path.abspath("workspaces/_cache") # Legacy/Global cache if needed
-WORKSPACES_DIR = os.path.abspath("workspaces")
+# 缓存写入本工具私有可读写目录，避免写到只读的共享卷
+WORKSPACES_DIR = os.path.abspath(os.getenv("LOCAL_WORKSPACES_DIR", "workspaces"))
 
 class CacheService:
     @staticmethod

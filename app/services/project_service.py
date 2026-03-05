@@ -6,13 +6,23 @@ from datetime import datetime
 from fastapi import UploadFile, HTTPException
 from typing import List, Tuple
 
-WORKSPACES_DIR = os.path.abspath("workspaces")
+# 源码读取目录：集成模式下指向共享卷（只读），独立模式下指向本地 workspaces/
+WORKSPACES_DIR = os.path.abspath(os.getenv("UNIPORTAL_STORAGE_PATH", "workspaces"))
+# 集成模式标志：由 UNIPORTAL_STORAGE_PATH 是否被设置决定
+UNIPORTAL_MODE = bool(os.getenv("UNIPORTAL_STORAGE_PATH"))
+# 本工具私有可读写目录：存放缓存、图谱、CPG 等生成物（独立模式与 WORKSPACES_DIR 相同）
+LOCAL_WORKSPACES_DIR = os.path.abspath(os.getenv("LOCAL_WORKSPACES_DIR", "workspaces"))
 
 import json
 
 class ProjectService:
     @staticmethod
     async def create_project(file: UploadFile, project_name: str = None) -> Tuple[str, str, int]:
+        if UNIPORTAL_MODE:
+            raise HTTPException(
+                status_code=403,
+                detail="集成模式下不支持直接上传文件，请通过 UniPortal 上传后在此处浏览。"
+            )
         project_id = f"proj_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
         project_dir = os.path.join(WORKSPACES_DIR, project_id)
         os.makedirs(project_dir, exist_ok=True)
@@ -58,11 +68,50 @@ class ProjectService:
         return project_id, project_name, file_count
 
     @staticmethod
+    def get_local_project_dir(project_id: str) -> str:
+        """
+        返回本工具私有的可读写目录（用于存 cpg.bin、graphs/、_cache/ 等生成物）。
+        集成模式：LOCAL_WORKSPACES_DIR/{project_id}（挂载到读写卷）
+        独立模式：与 get_project_path 相同
+        """
+        local_dir = os.path.join(LOCAL_WORKSPACES_DIR, project_id)
+        os.makedirs(local_dir, exist_ok=True)
+        return local_dir
+
+    @staticmethod
+    def _build_item_index() -> dict:
+        """
+        集成模式专用：遍历共享卷两层目录，建立
+          { item_id: abs_item_path } 的索引
+        目录结构：{portal_project_id}/{item_id}/{zip解压文件夹}/源码
+        """
+        index = {}
+        if not os.path.exists(WORKSPACES_DIR):
+            return index
+        for proj_dir in os.listdir(WORKSPACES_DIR):
+            proj_path = os.path.join(WORKSPACES_DIR, proj_dir)
+            if not os.path.isdir(proj_path) or proj_dir.startswith('.'):
+                continue
+            for item_id in os.listdir(proj_path):
+                item_path = os.path.join(proj_path, item_id)
+                if os.path.isdir(item_path) and not item_id.startswith(('.', '_')):
+                    index[item_id] = item_path
+        return index
+
+    @staticmethod
     def get_project_path(project_id: str) -> str:
-        path = os.path.join(WORKSPACES_DIR, project_id)
-        if not os.path.exists(path):
-            raise HTTPException(status_code=404, detail="Project not found")
-        return path
+        if UNIPORTAL_MODE:
+            # project_id == item_id，通过索引找到绝对路径
+            index = ProjectService._build_item_index()
+            path = index.get(project_id)
+            if not path or not os.path.exists(path):
+                raise HTTPException(status_code=404, detail="Project not found")
+            return path
+        else:
+            path = os.path.join(WORKSPACES_DIR, project_id)
+            if not os.path.exists(path):
+                raise HTTPException(status_code=404, detail="Project not found")
+            return path
 
     @staticmethod
     def list_files(project_id: str) -> List[str]:
@@ -127,6 +176,11 @@ class ProjectService:
 
     @staticmethod
     def delete_project(project_id: str) -> bool:
+        if UNIPORTAL_MODE:
+            raise HTTPException(
+                status_code=403,
+                detail="集成模式下不允许删除项目，请通过 UniPortal 管理。"
+            )
         # Debug logging
         print(f"DEBUG: Attempting to delete project_id: {repr(project_id)}")
         
@@ -149,25 +203,54 @@ class ProjectService:
     def list_projects() -> List[dict]:
         if not os.path.exists(WORKSPACES_DIR):
             return []
-        
+
         projects = []
-        for d in os.listdir(WORKSPACES_DIR):
-            path = os.path.join(WORKSPACES_DIR, d)
-            if os.path.isdir(path) and d.startswith("proj_"):
-                # Count files
+
+        if UNIPORTAL_MODE:
+            # 集成模式：目录结构为 {portal_project_id}/{item_id}/{zip解压文件夹}/源码
+            # project_id = item_id（单段 UUID，不含斜杠，URL 路由安全）
+            # project_name = item 下第一层子文件夹名（即 zip 解压出的文件夹名）
+            index = ProjectService._build_item_index()
+            for item_id, item_path in sorted(index.items()):
                 file_count = 0
-                for root, _, files in os.walk(path):
+                display_name = item_id  # 兜底用 item_id
+                try:
+                    sub_dirs = [
+                        d for d in os.listdir(item_path)
+                        if os.path.isdir(os.path.join(item_path, d))
+                        and not d.startswith(('.', '_'))
+                    ]
+                    if sub_dirs:
+                        display_name = sub_dirs[0]  # 取第一个子目录名作为展示名
+                except Exception:
+                    pass
+                for root, _, files in os.walk(item_path):
                     for f in files:
                         if f.endswith(('.c', '.h')):
                             file_count += 1
-                
-                # Get project name from meta
-                project_name = ProjectService.get_project_name(d)
-                
                 projects.append({
-                    "project_id": d,
-                    "project_name": project_name,
+                    "project_id": item_id,
+                    "project_name": display_name,
                     "file_count": file_count,
                     "status": "available"
                 })
-        return sorted(projects, key=lambda x: x['project_id'], reverse=True)
+        else:
+            # 独立模式：目录结构为 proj_YYYYMMDD_xxxx/
+            for d in os.listdir(WORKSPACES_DIR):
+                path = os.path.join(WORKSPACES_DIR, d)
+                if os.path.isdir(path) and d.startswith("proj_"):
+                    file_count = 0
+                    for root, _, files in os.walk(path):
+                        for f in files:
+                            if f.endswith(('.c', '.h')):
+                                file_count += 1
+                    project_name = ProjectService.get_project_name(d)
+                    projects.append({
+                        "project_id": d,
+                        "project_name": project_name,
+                        "file_count": file_count,
+                        "status": "available"
+                    })
+            projects = sorted(projects, key=lambda x: x['project_id'], reverse=True)
+
+        return projects

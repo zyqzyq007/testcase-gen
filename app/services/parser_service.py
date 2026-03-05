@@ -277,14 +277,16 @@ class ParserService:
         Generates metadata for code graph using Joern CPG analysis.
         Images are NOT generated here to speed up metadata retrieval.
         """
-        project_dir = ProjectService.get_project_path(project_id)
-        cpg_path = os.path.join(project_dir, "cpg.bin")
-        
+        # 源码目录（可能只读），cpg.bin 写到本工具私有可写目录
+        source_dir = ProjectService.get_project_path(project_id)
+        local_dir = ProjectService.get_local_project_dir(project_id)
+        cpg_path = os.path.join(local_dir, "cpg.bin")
+
         # 1. Parse project if needed
-        success = await JoernService.parse_project(project_dir, cpg_path)
+        success = await JoernService.parse_project(source_dir, cpg_path)
         if not success:
             return {}
-            
+
         # 2. Query CPG for metadata (calls, variables, etc.)
         graph = await JoernService.get_function_cpg_depth(cpg_path, function_name, depth, refresh=refresh)
         
