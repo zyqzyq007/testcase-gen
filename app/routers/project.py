@@ -36,6 +36,11 @@ async def delete_project(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found or could not be deleted")
     return {"status": "success", "project_id": project_id}
 
+@router.get("/{project_id}/has-design-doc")
+async def has_design_doc(project_id: str):
+    """判断项目是否包含任意设计文档（供前端决定是否执行第二步注释生成）"""
+    return {"has_design_doc": ProjectService.has_design_doc(project_id)}
+
 @router.get("/{project_id}/structure", response_model=ProjectStructure)
 async def get_project_structure(project_id: str):
     files = ProjectService.list_files(project_id)
@@ -44,7 +49,18 @@ async def get_project_structure(project_id: str):
     for path in files:
         # Use path as file_id (base64 encoded to be safe)
         file_id = base64.urlsafe_b64encode(path.encode()).decode()
-        
+        ext = os.path.splitext(path)[1].lstrip('.')  # "c", "h", "json", …
+
+        if ext == 'json':
+            # JSON design-doc files: no function parsing, just expose for viewing
+            structure.append(FileStructure(
+                file_id=file_id,
+                path=path,
+                file_type='json',
+                functions=[]
+            ))
+            continue
+
         try:
             content = ProjectService.get_file_content(project_id, path)
             functions = ParserService.parse_functions(content, file_id)
@@ -54,6 +70,7 @@ async def get_project_structure(project_id: str):
         structure.append(FileStructure(
             file_id=file_id,
             path=path,
+            file_type=ext or 'c',
             functions=functions
         ))
         

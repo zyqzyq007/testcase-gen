@@ -9,6 +9,12 @@ class GenerateTestRequest(BaseModel):
     function_intent: Optional[str] = None
     failed_task_id: Optional[str] = None
 
+class AnnotateTestRequest(BaseModel):
+    """第二步：基于设计文档给已有测试代码插入中文注释"""
+    project_id: str
+    function_id: str
+    task_id: str  # 第一步生成的 task_id
+
 class GenerateIntentRequest(BaseModel):
     project_id: str
     function_id: str

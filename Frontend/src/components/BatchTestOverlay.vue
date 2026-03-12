@@ -235,6 +235,13 @@ const start = async () => {
       return
     }
 
+    // 检查项目是否有设计文档（只查一次）
+    let hasDesignDoc = false
+    try {
+      const hdRes = await axios.get(`/api/project/${props.projectId}/has-design-doc`)
+      hasDesignDoc = hdRes.data.has_design_doc === true
+    } catch (e) { /* 忽略，不影响主流程 */ }
+
     batchStage.value = 2 // Running
     const queue = new TaskQueue(props.concurrency)
     currentQueue = queue
@@ -245,7 +252,7 @@ const start = async () => {
       const p = queue.add(async () => {
          const abortController = queue.createAbortController()
          try {
-            // Generate
+            // ── 第一步：生成测试用例 ──
             const genRes = await axios.post('/api/testcase/generate', {
               project_id: props.projectId,
               function_id: func.function_id,
@@ -255,9 +262,25 @@ const start = async () => {
             })
             batchStatus.value.generated++
             
-            const taskId = genRes.data.task_id
-            
-            // Execute
+            let taskId = genRes.data.task_id
+
+            // ── 第二步：若有设计文档，插入中文注释（非流式，不阻塞进度展示） ──
+            if (hasDesignDoc) {
+              try {
+                const annotateRes = await axios.post('/api/testcase/annotate', {
+                  project_id: props.projectId,
+                  function_id: func.function_id,
+                  task_id: taskId
+                }, { signal: abortController.signal })
+                // annotate 接口返回同一个 task_id，代码已覆盖写入
+                taskId = annotateRes.data.task_id
+              } catch (e) {
+                // 第二步失败不中断整体流程（可能该函数无设计文档）
+                console.warn(`Annotate skipped for ${func.name}:`, e?.response?.data?.detail || e.message)
+              }
+            }
+
+            // ── 第三步：执行测试 ──
             const execRes = await axios.post('/api/testcase/execute', { 
               task_id: taskId 
             }, {

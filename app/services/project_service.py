@@ -18,13 +18,10 @@ import json
 class ProjectService:
     @staticmethod
     async def create_project(file: UploadFile, project_name: str = None) -> Tuple[str, str, int]:
-        if UNIPORTAL_MODE:
-            raise HTTPException(
-                status_code=403,
-                detail="集成模式下不支持直接上传文件，请通过 UniPortal 上传后在此处浏览。"
-            )
         project_id = f"proj_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
-        project_dir = os.path.join(WORKSPACES_DIR, project_id)
+        # 集成模式下写入本工具私有的可读写目录，避免写入只读的共享卷
+        save_dir = LOCAL_WORKSPACES_DIR if UNIPORTAL_MODE else WORKSPACES_DIR
+        project_dir = os.path.join(save_dir, project_id)
         os.makedirs(project_dir, exist_ok=True)
 
         if not project_name:
@@ -56,16 +53,126 @@ class ProjectService:
                 # Should we reject? For now allow but count is 0 if not c/h
                 pass
 
+        # Scan for function design documents (JSON files with function_design structure)
+        design_docs = {}
+        for root, dirs, files in os.walk(project_dir):
+            for f in files:
+                if not f.endswith('.json') or f == 'meta.json':
+                    continue
+                json_path = os.path.join(root, f)
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as jf:
+                        data = json.load(jf)
+                    # Support both {"function_design": {...}} and direct array/list of such objects
+                    entries = []
+                    if isinstance(data, dict) and 'function_design' in data:
+                        entries = [data]
+                    elif isinstance(data, list):
+                        entries = [item for item in data if isinstance(item, dict) and 'function_design' in item]
+                    for entry in entries:
+                        fd = entry['function_design']
+                        fname = fd.get('basic_info', {}).get('function_name', '').strip()
+                        if fname:
+                            design_docs[fname] = fd
+                except Exception:
+                    pass
+
         # Save metadata
         meta = {
             "project_name": project_name,
             "created_at": datetime.now().isoformat(),
-            "original_filename": file.filename
+            "original_filename": file.filename,
+            "design_docs": design_docs
         }
         with open(os.path.join(project_dir, "meta.json"), "w") as f:
-            json.dump(meta, f)
+            json.dump(meta, f, ensure_ascii=False, indent=2)
 
         return project_id, project_name, file_count
+
+    @staticmethod
+    def get_function_design_doc(project_id: str, function_name: str) -> dict:
+        """
+        按函数名查找项目中的设计文档（function_design 结构）。
+        优先从 meta.json 中读取上传时扫描到的 design_docs，
+        若 meta.json 不含该字段则实时扫描项目目录中的 JSON 文件。
+        返回 function_design 字典，未找到则返回 None。
+        """
+        if not function_name:
+            return None
+        # Try reading from meta.json first (fastest path)
+        base_dir = LOCAL_WORKSPACES_DIR if UNIPORTAL_MODE else WORKSPACES_DIR
+        meta_path = os.path.join(base_dir, project_id, "meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                if 'design_docs' in meta and function_name in meta['design_docs']:
+                    return meta['design_docs'][function_name]
+            except Exception:
+                pass
+        # Fallback: live scan of JSON files in the project directory
+        try:
+            project_dir = ProjectService.get_project_path(project_id)
+        except Exception:
+            return None
+        for root, dirs, files in os.walk(project_dir):
+            for fname in files:
+                if not fname.endswith('.json') or fname == 'meta.json':
+                    continue
+                json_path = os.path.join(root, fname)
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as jf:
+                        data = json.load(jf)
+                    entries = []
+                    if isinstance(data, dict) and 'function_design' in data:
+                        entries = [data]
+                    elif isinstance(data, list):
+                        entries = [item for item in data if isinstance(item, dict) and 'function_design' in item]
+                    for entry in entries:
+                        fd = entry['function_design']
+                        if fd.get('basic_info', {}).get('function_name', '').strip() == function_name:
+                            return fd
+                except Exception:
+                    pass
+        return None
+
+    @staticmethod
+    def has_design_doc(project_id: str) -> bool:
+        """
+        判断该项目是否包含任意设计文档（meta.json 里的 design_docs 非空，
+        或者项目目录下有含 function_design 结构的 JSON 文件）。
+        """
+        base_dir = LOCAL_WORKSPACES_DIR if UNIPORTAL_MODE else WORKSPACES_DIR
+        meta_path = os.path.join(base_dir, project_id, "meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                if meta.get('design_docs'):
+                    return True
+            except Exception:
+                pass
+        # Fallback: live scan
+        try:
+            project_dir = ProjectService.get_project_path(project_id)
+        except Exception:
+            return False
+        for root, _, files in os.walk(project_dir):
+            for fname in files:
+                if not fname.endswith('.json') or fname == 'meta.json':
+                    continue
+                try:
+                    with open(os.path.join(root, fname), 'r', encoding='utf-8') as jf:
+                        data = json.load(jf)
+                    if isinstance(data, dict) and 'function_design' in data:
+                        return True
+                    if isinstance(data, list) and any(
+                        isinstance(i, dict) and 'function_design' in i for i in data
+                    ):
+                        return True
+                except Exception:
+                    pass
+        return False
 
     @staticmethod
     def get_local_project_dir(project_id: str) -> str:
@@ -101,7 +208,11 @@ class ProjectService:
     @staticmethod
     def get_project_path(project_id: str) -> str:
         if UNIPORTAL_MODE:
-            # project_id == item_id，通过索引找到绝对路径
+            # 先查本工具私有目录（用户自行上传的项目）
+            local_path = os.path.join(LOCAL_WORKSPACES_DIR, project_id)
+            if os.path.exists(local_path):
+                return local_path
+            # 再通过索引查 UniPortal 共享卷中的项目
             index = ProjectService._build_item_index()
             path = index.get(project_id)
             if not path or not os.path.exists(path):
@@ -119,9 +230,12 @@ class ProjectService:
         file_paths = []
         for root, _, files in os.walk(project_dir):
             for file in files:
-                if file.endswith(('.c', '.h')):
-                    # Return relative path from project root
-                    rel_path = os.path.relpath(os.path.join(root, file), project_dir)
+                if file.endswith(('.c', '.h', '.json')):
+                    # Skip meta.json at the project root
+                    full = os.path.join(root, file)
+                    rel_path = os.path.relpath(full, project_dir)
+                    if rel_path == 'meta.json':
+                        continue
                     file_paths.append(rel_path)
         return sorted(file_paths)
 
@@ -141,7 +255,9 @@ class ProjectService:
 
     @staticmethod
     def get_project_name(project_id: str) -> str:
-        project_dir = os.path.join(WORKSPACES_DIR, project_id)
+        # 集成模式下本地上传的项目存放在 LOCAL_WORKSPACES_DIR
+        base_dir = LOCAL_WORKSPACES_DIR if UNIPORTAL_MODE else WORKSPACES_DIR
+        project_dir = os.path.join(base_dir, project_id)
         meta_path = os.path.join(project_dir, "meta.json")
         if os.path.exists(meta_path):
             try:
@@ -177,10 +293,19 @@ class ProjectService:
     @staticmethod
     def delete_project(project_id: str) -> bool:
         if UNIPORTAL_MODE:
-            raise HTTPException(
-                status_code=403,
-                detail="集成模式下不允许删除项目，请通过 UniPortal 管理。"
-            )
+            # 集成模式下只允许删除本工具私有目录中用户自行上传的项目
+            local_path = os.path.join(LOCAL_WORKSPACES_DIR, project_id.strip())
+            if not os.path.exists(local_path):
+                raise HTTPException(
+                    status_code=403,
+                    detail="集成模式下不允许删除 UniPortal 项目，请通过 UniPortal 管理。"
+                )
+            try:
+                shutil.rmtree(local_path)
+                return True
+            except Exception as e:
+                print(f"Error deleting project {project_id}: {e}")
+                return False
         # Debug logging
         print(f"DEBUG: Attempting to delete project_id: {repr(project_id)}")
         
@@ -234,6 +359,24 @@ class ProjectService:
                     "file_count": file_count,
                     "status": "available"
                 })
+
+            # 合并本工具私有目录中用户自行上传的项目（proj_ 前缀）
+            if os.path.exists(LOCAL_WORKSPACES_DIR):
+                for d in os.listdir(LOCAL_WORKSPACES_DIR):
+                    path = os.path.join(LOCAL_WORKSPACES_DIR, d)
+                    if os.path.isdir(path) and d.startswith("proj_"):
+                        file_count = 0
+                        for root, _, files in os.walk(path):
+                            for f in files:
+                                if f.endswith(('.c', '.h')):
+                                    file_count += 1
+                        project_name = ProjectService.get_project_name(d)
+                        projects.append({
+                            "project_id": d,
+                            "project_name": project_name,
+                            "file_count": file_count,
+                            "status": "available"
+                        })
         else:
             # 独立模式：目录结构为 proj_YYYYMMDD_xxxx/
             for d in os.listdir(WORKSPACES_DIR):

@@ -16,6 +16,7 @@ class FunctionInfo(BaseModel):
 class FileStructure(BaseModel):
     file_id: str
     path: str
+    file_type: Optional[str] = "c"   # "c", "h", "json", etc.
     functions: List[FunctionInfo]
 
 class ProjectStructure(BaseModel):

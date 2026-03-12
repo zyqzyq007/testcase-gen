@@ -173,14 +173,16 @@ class ParserService:
                     continue
 
                 if not header_path:
-                    skipped.append(TestTargetFunctionInfo(
+                    # No corresponding header found — treat as must-test anyway
+                    # (the function is non-static and externally linkable)
+                    must_test.append(TestTargetFunctionInfo(
                         function_id=f.function_id,
                         name=f.name,
                         start_line=f.start_line,
                         end_line=f.end_line,
                         signature=f.signature,
                         source_file=c_path,
-                        category="skipped",
+                        category="external_linkage",
                         header_file=None,
                         declared_in_header=False,
                         reason="no_corresponding_header"
@@ -201,14 +203,16 @@ class ParserService:
                         declared_in_header=True
                     ))
                 else:
-                    skipped.append(TestTargetFunctionInfo(
+                    # Header exists but function not declared in it —
+                    # still treat as must-test (non-static, externally linked)
+                    must_test.append(TestTargetFunctionInfo(
                         function_id=f.function_id,
                         name=f.name,
                         start_line=f.start_line,
                         end_line=f.end_line,
                         signature=f.signature,
                         source_file=c_path,
-                        category="skipped",
+                        category="external_linkage",
                         header_file=header_path,
                         declared_in_header=False,
                         reason="not_declared_in_header"

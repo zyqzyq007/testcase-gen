@@ -377,22 +377,25 @@ class RunnerService:
         
         # The source file path is relative to project root
         target_file_rel = metadata["source_file_path"]
+        function_name   = metadata.get("function_name", "")
         
-        # 2.5 Make target file testable (remove static keywords)
-        # This allows testing internal static functions as requested by the user.
-        # Since we are working in a temporary task_dir, the original source is safe.
+        # 2.5 Make target file testable
+        # Remove 'static' so internal functions are visible to the linker.
+        # (We no longer inject __attribute__((weak)) at the source level because
+        #  the regex approach is unreliable for complex C code.  Instead we use
+        #  `objcopy --weaken-symbol` at the binary level after compilation — see
+        #  the post-compile step below.)
         target_abs_path = os.path.join(task_dir, target_file_rel)
         if os.path.exists(target_abs_path):
             try:
                 with open(target_abs_path, 'r') as f:
                     content = f.read()
-                # Remove 'static ' at the beginning of lines to expose internal functions,
-                # but NOT if it is 'static inline' as that can break linking of helper functions.
-                new_content = re.sub(r'^static\s+(?!inline)', '', content, flags=re.MULTILINE)
+                # Strip leading 'static ' (but not 'static inline')
+                content = re.sub(r'^static\s+(?!inline)', '', content, flags=re.MULTILINE)
                 with open(target_abs_path, 'w') as f:
-                    f.write(new_content)
+                    f.write(content)
             except Exception as e:
-                print(f"Failed to make source testable: {e}")
+                print(f"Failed to strip static: {e}")
 
         # 3. Compile
         # Implementation:
@@ -449,6 +452,42 @@ class RunnerService:
                 execution_started=False,
                 stderr=f"Target compilation failed:\n{stderr_t.decode(errors='replace')}\n{stdout_t.decode(errors='replace')}"
              )
+
+        # 1b. Weaken all symbols in the target .o EXCEPT the function under test.
+        # This is the correct, binary-level solution to "multiple definition" linker
+        # errors when the LLM-generated test file redefines a helper from the same .c.
+        # Approach:
+        #   nm --defined-only -P <file>.o   → lists every symbol defined in the .o
+        #   objcopy --weaken-symbol=<sym>   → demotes a symbol to WEAK so the
+        #                                     strong definition in the test file wins
+        # The target function itself must remain GLOBAL (strong) so gcov can trace it.
+        target_obj = os.path.basename(target_file_rel).replace(".c", ".o")
+        if function_name:
+            try:
+                nm_proc = await asyncio.create_subprocess_exec(
+                    "nm", "--defined-only", "-P", target_obj,
+                    cwd=task_dir,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                nm_out, _ = await nm_proc.communicate()
+                # nm -P format: "<name> <type> <value> <size>"
+                # We only want TEXT symbols (type T or t) that are NOT the target function
+                weaken_args = []
+                for line in nm_out.decode(errors='replace').splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1] in ('T', 't'):
+                        sym = parts[0]
+                        if sym != function_name:
+                            weaken_args.extend([f'--weaken-symbol={sym}'])
+                if weaken_args:
+                    objcopy_proc = await asyncio.create_subprocess_exec(
+                        "objcopy", *weaken_args, target_obj,
+                        cwd=task_dir,
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    await objcopy_proc.communicate()
+            except Exception as e:
+                print(f"objcopy weaken step failed (non-fatal): {e}")
 
         # 2. Compile runner & unity
         cmd_compile_others = ["gcc", "-c", "test_runner.c", "unity.c"] + c_flags + include_paths

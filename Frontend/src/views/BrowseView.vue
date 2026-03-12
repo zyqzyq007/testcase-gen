@@ -115,7 +115,7 @@ import axios from 'axios'
 import BatchTestOverlay from '../components/BatchTestOverlay.vue'
 import hljs from 'highlight.js'
 import { 
-  FolderTree, FileCode, RotateCw, ChevronRight, 
+  FolderTree, FileCode, FileJson, RotateCw, ChevronRight, 
   Zap, Code2, Folder
 } from 'lucide-vue-next'
 
@@ -163,12 +163,15 @@ const FileTreeNode = {
 
     return () => {
       const isSelected = props.node.type === 'file' && props.selectedFileId === props.node.id
+      const isJson = props.node.type === 'file' && props.node.data?.file_type === 'json'
       
       return h('div', { class: 'select-none' }, [
         h('div', {
           class: [
             'flex items-center space-x-2 px-2 py-1.5 rounded cursor-pointer transition-colors text-xs font-medium',
-            isSelected ? 'bg-primary-100 text-primary-900' : 'hover:bg-slate-200 text-slate-600'
+            isSelected
+              ? (isJson ? 'bg-amber-100 text-amber-900' : 'bg-primary-100 text-primary-900')
+              : 'hover:bg-slate-200 text-slate-600'
           ],
           style: { paddingLeft: `${props.depth * 12 + 8}px` },
           onClick: handleClick
@@ -177,10 +180,15 @@ const FileTreeNode = {
             class: ['w-3.5 h-3.5 transition-transform text-slate-400', expanded.value ? 'rotate-90' : ''],
             onClick: (e) => { e.stopPropagation(); toggle(); }
           }) : null,
-          h(props.node.type === 'directory' ? Folder : FileCode, {
-            class: ['w-4 h-4', props.node.type === 'directory' ? 'text-primary-600' : 'text-slate-400']
-          }),
-          h('span', { class: 'truncate' }, props.node.name)
+          h(
+            props.node.type === 'directory' ? Folder : (isJson ? FileJson : FileCode),
+            { class: ['w-4 h-4', props.node.type === 'directory' ? 'text-primary-600' : (isJson ? 'text-amber-500' : 'text-slate-400')] }
+          ),
+          h('span', { class: 'truncate' }, props.node.name),
+          // Badge for JSON design docs
+          isJson ? h('span', {
+            class: 'ml-1 px-1 py-0 rounded text-[9px] font-bold bg-amber-200 text-amber-700 leading-tight shrink-0'
+          }, '设计文档') : null
         ]),
         
         expanded.value && props.node.children ? h('div', { class: 'mt-0.5' }, 
@@ -194,7 +202,7 @@ const FileTreeNode = {
           }))
         ) : null,
         
-        expanded.value && props.node.type === 'file' && props.node.data.functions.length > 0 ? h('div', { class: 'mt-0.5' },
+        expanded.value && props.node.type === 'file' && !isJson && props.node.data.functions.length > 0 ? h('div', { class: 'mt-0.5' },
           props.node.data.functions.map(func => {
             const isFuncSelected = props.selectedFunctionId === func.function_id
             return h('div', {
@@ -222,13 +230,15 @@ const FileTreeNode = {
 
 const highlightedCode = computed(() => {
   if (!fileContent.value) return ''
-  const lines = fileContent.value.split('\n')
-  const result = hljs.highlight(fileContent.value, { language: 'c' }).value
+  const lang = selectedFile.value?.file_type === 'json' ? 'json' : 'c'
+  const result = hljs.highlight(fileContent.value, { language: lang }).value
   const highlightedLines = result.split('\n')
   
   return highlightedLines.map((line, idx) => {
     const lineNum = idx + 1
-    const func = selectedFile.value?.functions.find(f => lineNum >= f.start_line && lineNum <= f.end_line)
+    const func = lang === 'c'
+      ? selectedFile.value?.functions.find(f => lineNum >= f.start_line && lineNum <= f.end_line)
+      : null
     const isTarget = store.functionId && func?.function_id === store.functionId
     const isInFunction = !!func
     

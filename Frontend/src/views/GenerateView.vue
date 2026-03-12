@@ -232,11 +232,13 @@
 
           <button 
             @click="generateTest"
-            :disabled="generating"
+            :disabled="generating || annotating"
             class="w-full py-4 bg-primary-900 hover:bg-primary-800 disabled:bg-slate-200 text-white font-bold rounded-xl transition-all flex items-center justify-center space-x-3 shadow-lg"
           >
-            <Zap class="w-5 h-5" :class="{ 'animate-pulse': generating }" />
-            <span>{{ generating ? 'AI 正在编写测试代码...' : '立即生成测试用例' }}</span>
+            <Zap class="w-5 h-5" :class="{ 'animate-pulse': generating || annotating }" />
+            <span>
+              {{ generating ? 'AI 正在编写测试代码...' : annotating ? 'AI 正在插入设计文档注释...' : '立即生成测试用例' }}
+            </span>
           </button>
         </div>
       </div>
@@ -333,6 +335,7 @@ const graphItemReady = ref({
   pdg: false
 })
 const generating = ref(false)
+const annotating = ref(false)  // 第二步：插入设计文档注释中
 const funcDetail = ref(null)
 const codeGraph = ref({
   variables: [],
@@ -509,6 +512,7 @@ const openImage = (url) => {
 
 const generateTest = async () => {
   generating.value = true
+  annotating.value = false
   generatedCode.value = ''
   
   // Use failure context if available in store
@@ -520,12 +524,13 @@ const generateTest = async () => {
     store.setFailureContext(null)
   }
 
+  let currentTaskId = null
+
   try {
+    // ── 第一步：基于代码生成测试用例 ──
     const response = await fetch('/api/testcase/generate/stream', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         project_id: store.projectId,
         function_id: store.functionId,
@@ -557,6 +562,7 @@ const generateTest = async () => {
           if (data.type === 'content') {
             generatedCode.value += data.content
           } else if (data.type === 'task_id') {
+            currentTaskId = data.task_id
             store.setTask(data.task_id)
           }
         } catch (e) {
@@ -564,11 +570,61 @@ const generateTest = async () => {
         }
       }
     }
+
+    // ── 第二步：若项目有设计文档，插入中文注释 ──
+    if (currentTaskId) {
+      try {
+        const hdRes = await axios.get(`/api/project/${store.projectId}/has-design-doc`)
+        if (hdRes.data.has_design_doc) {
+          generating.value = false
+          annotating.value = true
+          generatedCode.value = ''  // 清空，流式展示带注释的版本
+
+          const annotateRes = await fetch('/api/testcase/annotate/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              project_id: store.projectId,
+              function_id: store.functionId,
+              task_id: currentTaskId
+            })
+          })
+
+          if (annotateRes.ok) {
+            const ar = annotateRes.body.getReader()
+            const ad = new TextDecoder()
+            let ab = ''
+            while (true) {
+              const { done, value } = await ar.read()
+              if (done) break
+              ab += ad.decode(value, { stream: true })
+              const lines = ab.split('\n')
+              ab = lines.pop()
+              for (const line of lines) {
+                if (!line.trim()) continue
+                try {
+                  const data = JSON.parse(line)
+                  if (data.type === 'content') {
+                    generatedCode.value += data.content
+                  }
+                  // type === 'done' 不需要额外处理，task_id 不变
+                } catch (e) { /* ignore */ }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // 第二步失败不影响结果，忽略即可
+        console.warn('Annotate step skipped or failed:', e)
+      }
+    }
+
   } catch (error) {
     console.error('Generation failed:', error)
     alert('生成失败，请检查后端 LLM 配置')
   } finally {
     generating.value = false
+    annotating.value = false
   }
 }
 
