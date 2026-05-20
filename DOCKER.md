@@ -15,11 +15,12 @@ docker build -t testcase-gen:latest .
 使用以下命令启动容器（将容器内的 8000 端口映射到宿主机的 8001 端口）：
 
 ```bash
-docker run -d -p 8001:8000 --name testcase-gen-test testcase-gen:latest
+docker run -d -p 8007:8000 --name testcase-gen-test testcase-gen:opt
 ```
 
 ```bash
 docker rm -f testcase-gen-test # 移除原来的
+docker rm -f testcase-gen # 移除原来的
 ```
 
 
@@ -33,6 +34,12 @@ docker run -d \
   --name testcase-gen-test \
   -v $(pwd)/workspaces:/app/workspaces \
   testcase-gen:latest
+
+docker run -d \
+  -p 8007:8000 \
+  --name testcase-gen-test \
+  -v $(pwd)/workspaces:/app/workspaces \
+  testcase-gen:slim
 ```
 
 > **参数说明**：
@@ -47,6 +54,8 @@ docker run -d \
 - **前端页面**：[http://localhost:8007/index.html](http://localhost:8007/index.html)
 - **后端 API 健康检查**：[http://localhost:8007/api/health](http://localhost:8007/api/health)
 - **API 文档 (Swagger)**：[http://localhost:8007/docs](http://localhost:8007/docs)
+
+211.71.15.55:8007
 
 ## 4. Docker Compose 启动（与 UniPortal 集成）
 

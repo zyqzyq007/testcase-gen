@@ -3,6 +3,7 @@ uvicorn
 python-multipart
 pycparser
 httpx
+openai>=1.0
 aiofiles
 pydantic
 python-dotenv

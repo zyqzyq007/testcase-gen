@@ -31,25 +31,36 @@
         </template>
       </div>
 
-      <div class="flex items-center space-x-4 text-xs text-slate-500">
+      <div class="flex items-center space-x-2 text-xs text-slate-500">
         <div v-if="store.projectName" class="flex items-center bg-slate-100 px-3 py-1 rounded-full">
           <span class="opacity-60 mr-2 font-medium">Project:</span>
           <span class="text-slate-900 font-semibold">{{ store.projectName }}</span>
         </div>
+        <button
+          @click="settingsOpen = true"
+          title="LLM 接入配置"
+          class="p-2 rounded-full hover:bg-slate-100 text-slate-500 hover:text-primary-600 transition-colors"
+        >
+          <Settings class="w-4 h-4" />
+        </button>
       </div>
     </div>
+
+    <SettingsModal :visible="settingsOpen" @close="settingsOpen = false" />
   </nav>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../store'
-import { Check, Upload, FolderTree, Zap, BarChart3, LayoutDashboard } from 'lucide-vue-next'
+import { Check, Upload, FolderTree, Zap, BarChart3, LayoutDashboard, Settings } from 'lucide-vue-next'
+import SettingsModal from './SettingsModal.vue'
 
 const store = useAppStore()
 const route = useRoute()
 const router = useRouter()
+const settingsOpen = ref(false)
 
 const steps = [
   { name: '项目上传', path: '/', icon: Upload },

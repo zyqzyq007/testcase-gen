@@ -7,7 +7,7 @@ import os
 # Load environment variables from .env file
 load_dotenv()
 
-from app.routers import project, testcase
+from app.routers import project, testcase, config
 
 app = FastAPI(title="C Unit Test Generator", version="0.1.0")
 
@@ -22,6 +22,7 @@ app.add_middleware(
 
 app.include_router(testcase.router)
 app.include_router(project.router)
+app.include_router(config.router)
 
 @app.get("/api/health")
 async def health_check():
