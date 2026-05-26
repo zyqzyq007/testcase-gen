@@ -28,6 +28,7 @@ class UploadResponse(BaseModel):
     project_name: str
     file_count: int
     status: str
+    source: Optional[str] = None  # "local" = 私有卷上传; "uniportal" = UniPortal 共享卷
 
 class TestTargetFunctionInfo(BaseModel):
     function_id: str

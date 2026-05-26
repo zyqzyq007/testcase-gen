@@ -325,7 +325,10 @@ class ProjectService:
             return False
 
     @staticmethod
-    def list_projects() -> List[dict]:
+    def list_projects(portal_project_id: str = None) -> List[dict]:
+        # portal_project_id: 当从 UniPortal iframe 进入时传入，仅列出该工程下的 item；
+        # 为 None 时表示子工具被独立访问，不列出任何 UniPortal 项目（避免跨工程暴露数据）。
+        # 私有上传（source="local"）永远列出。
         if not os.path.exists(WORKSPACES_DIR):
             return []
 
@@ -335,7 +338,20 @@ class ProjectService:
             # 集成模式：目录结构为 {portal_project_id}/{item_id}/{zip解压文件夹}/源码
             # project_id = item_id（单段 UUID，不含斜杠，URL 路由安全）
             # project_name = item 下第一层子文件夹名（即 zip 解压出的文件夹名）
-            index = ProjectService._build_item_index()
+            if portal_project_id:
+                # 仅扫描指定工程目录下的 item
+                proj_path = os.path.join(WORKSPACES_DIR, portal_project_id)
+                if os.path.isdir(proj_path):
+                    index = {}
+                    for item_id in os.listdir(proj_path):
+                        item_path = os.path.join(proj_path, item_id)
+                        if os.path.isdir(item_path) and not item_id.startswith(('.', '_')):
+                            index[item_id] = item_path
+                else:
+                    index = {}
+            else:
+                # 未指定工程：不列出任何 UniPortal 项目（仅显示下方私有上传）
+                index = {}
             for item_id, item_path in sorted(index.items()):
                 file_count = 0
                 display_name = item_id  # 兜底用 item_id
@@ -357,7 +373,8 @@ class ProjectService:
                     "project_id": item_id,
                     "project_name": display_name,
                     "file_count": file_count,
-                    "status": "available"
+                    "status": "available",
+                    "source": "uniportal"
                 })
 
             # 合并本工具私有目录中用户自行上传的项目（proj_ 前缀）
@@ -375,7 +392,8 @@ class ProjectService:
                             "project_id": d,
                             "project_name": project_name,
                             "file_count": file_count,
-                            "status": "available"
+                            "status": "available",
+                            "source": "local"
                         })
         else:
             # 独立模式：目录结构为 proj_YYYYMMDD_xxxx/
@@ -392,7 +410,8 @@ class ProjectService:
                         "project_id": d,
                         "project_name": project_name,
                         "file_count": file_count,
-                        "status": "available"
+                        "status": "available",
+                        "source": "local"
                     })
             projects = sorted(projects, key=lambda x: x['project_id'], reverse=True)
 

@@ -426,7 +426,10 @@ const startBatchTesting = async (projectId) => {
 const fetchProjects = async () => {
   loading.value = true
   try {
-    const response = await axios.get('/api/project/list')
+    const params = store.portalProjectId
+      ? { portal_project_id: store.portalProjectId }
+      : {}
+    const response = await axios.get('/api/project/list', { params })
     projects.value = response.data
   } catch (error) {
     console.error('Fetch projects failed:', error)

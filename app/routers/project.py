@@ -21,12 +21,14 @@ async def upload_project(
         project_id=project_id,
         project_name=name,
         file_count=count,
-        status="uploaded"
+        status="uploaded",
+        source="local"
     )
 
 @router.get("/list", response_model=List[UploadResponse])
-async def list_projects():
-    projects = ProjectService.list_projects()
+async def list_projects(portal_project_id: Optional[str] = None):
+    # portal_project_id: 由 UniPortal iframe 通过 URL query 传入，限定列表为该工程下的 item
+    projects = ProjectService.list_projects(portal_project_id=portal_project_id)
     return [UploadResponse(**p) for p in projects]
 
 @router.delete("/{project_id}")

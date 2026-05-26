@@ -15,7 +15,7 @@ docker build -t testcase-gen:latest .
 使用以下命令启动容器（将容器内的 8000 端口映射到宿主机的 8001 端口）：
 
 ```bash
-docker run -d -p 8007:8000 --name testcase-gen-test testcase-gen:opt
+docker run -d -p 8007:8000 --name testcase-gen-test testcase-gen:latest
 ```
 
 ```bash
@@ -39,7 +39,7 @@ docker run -d \
   -p 8007:8000 \
   --name testcase-gen-test \
   -v $(pwd)/workspaces:/app/workspaces \
-  testcase-gen:slim
+  testcase-gen:latest
 ```
 
 > **参数说明**：
