@@ -208,16 +208,21 @@ class ProjectService:
     @staticmethod
     def get_project_path(project_id: str) -> str:
         if UNIPORTAL_MODE:
-            # 先查本工具私有目录（用户自行上传的项目）
+            # 优先查 UniPortal 共享卷:
+            #   private 卷里可能存在以 item_id 命名的"空壳目录"
+            #   (上次跑测试时留下的 _cache/、cpg.bin、graphs/ 等生成物),
+            #   如果先查 private 会被空壳遮挡, 拿不到真正的源码.
+            #   反转优先级是安全的: UniPortal item_id 是纯 UUID,
+            #   私有上传 project_id 是 proj_ 前缀, 两个命名空间不冲突.
+            index = ProjectService._build_item_index()
+            path = index.get(project_id)
+            if path and os.path.exists(path):
+                return path
+            # 共享卷找不到时再回退到私有目录 (用户自行上传的 proj_xxxx 项目)
             local_path = os.path.join(LOCAL_WORKSPACES_DIR, project_id)
             if os.path.exists(local_path):
                 return local_path
-            # 再通过索引查 UniPortal 共享卷中的项目
-            index = ProjectService._build_item_index()
-            path = index.get(project_id)
-            if not path or not os.path.exists(path):
-                raise HTTPException(status_code=404, detail="Project not found")
-            return path
+            raise HTTPException(status_code=404, detail="Project not found")
         else:
             path = os.path.join(WORKSPACES_DIR, project_id)
             if not os.path.exists(path):

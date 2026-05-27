@@ -60,4 +60,20 @@ const router = createRouter({
   routes,
 })
 
+// 全局守卫: SPA 路由切换时自动把 portal_project_id 同步到 URL query
+// 这样无论刷新页面、复制 URL、跨 tab 打开, URL 自身就保留了当前工程上下文,
+// 不再单纯依赖 sessionStorage 兜底.
+router.beforeEach((to, from, next) => {
+  const store = useAppStore()
+  if (store.portalProjectId && !to.query.portal_project_id) {
+    next({
+      path: to.path,
+      query: { ...to.query, portal_project_id: store.portalProjectId },
+      replace: true,
+    })
+    return
+  }
+  next()
+})
+
 export default router
