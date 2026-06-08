@@ -165,6 +165,38 @@ async def get_test_summary(project_id: str):
         "functions": summary
     }
 
+@router.get("/{project_id}/export")
+async def export_test_results(project_id: str):
+    """
+    导出项目所有函数信息及测试结果为 JSON（含生成的测试代码）。
+    供总览看板的「导出」按钮调用。
+    """
+    from app.services.cache_service import CacheService
+    from datetime import datetime
+
+    summary = await get_test_summary(project_id)
+
+    # 在汇总结果基础上补充每个函数生成的测试代码与缓存更新时间
+    for item in summary["functions"]:
+        cache_data = CacheService.get_function_data(project_id, item["source_file"], item["name"])
+        item["test_code"] = cache_data.get("test_code")
+        item["updated_at"] = cache_data.get("updated_at")
+
+    funcs = summary["functions"]
+    stats = {
+        "total": summary["total_functions"],
+        "passed": sum(1 for f in funcs if f["status"] == "passed"),
+        "failed": sum(1 for f in funcs if f["status"] in ("failed", "ignored")),
+        "compile_error": sum(1 for f in funcs if f["status"] == "compile_error"),
+    }
+
+    return {
+        "project_id": project_id,
+        "exported_at": datetime.now().isoformat(),
+        "stats": stats,
+        "functions": funcs,
+    }
+
 @router.get("/{project_id}/file")
 async def get_file_source(project_id: str, file_id: str = Query(...)):
     try:

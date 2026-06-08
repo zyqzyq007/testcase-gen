@@ -14,6 +14,10 @@
           <button @click="fetchSummary" class="p-2 text-slate-500 hover:bg-slate-100 rounded transition-colors" title="刷新">
             <RotateCw class="w-5 h-5" :class="{'animate-spin': loading}" />
           </button>
+          <button @click="exportJson" :disabled="exporting || functions.length === 0" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg transition-colors text-sm flex items-center gap-1.5">
+            <Download class="w-4 h-4" />
+            {{ exporting ? '导出中...' : '导出 JSON' }}
+          </button>
           <button @click="router.push('/browse')" class="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg transition-colors text-sm">
             进入项目浏览
           </button>
@@ -137,12 +141,13 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../store'
 import axios from 'axios'
-import { LayoutDashboard, RotateCw, CheckCircle2, XCircle, AlertTriangle, Clock, Ban } from 'lucide-vue-next'
+import { LayoutDashboard, RotateCw, CheckCircle2, XCircle, AlertTriangle, Clock, Ban, Download } from 'lucide-vue-next'
 
 const router = useRouter()
 const store = useAppStore()
 
 const loading = ref(false)
+const exporting = ref(false)
 const functions = ref([])
 
 const stats = computed(() => {
@@ -165,6 +170,30 @@ const fetchSummary = async () => {
     console.error('Fetch summary failed:', e)
   } finally {
     loading.value = false
+  }
+}
+
+const exportJson = async () => {
+  if (!store.projectId) return
+  exporting.value = true
+  try {
+    const res = await axios.get(`/api/project/${store.projectId}/export?t=${Date.now()}`)
+    const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const name = (store.projectName || store.projectId || 'project').replace(/[^\w.-]+/g, '_')
+    const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')
+    a.download = `${name}_testcase_export_${ts}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    console.error('Export failed:', e)
+    alert('导出失败，请稍后重试')
+  } finally {
+    exporting.value = false
   }
 }
 
