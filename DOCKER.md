@@ -84,7 +84,7 @@ docker-compose down
 ### 强制重建并重启（代码有改动时）
 
 ```bash
-docker-compose down && docker-compose up --build -d
+docker-compose down && docker-compose up --build -d && docker image prune -f
 ```
 
 > **端口**：服务监听宿主机 **8000** 端口，访问地址同第 3 节（将端口改为 `8000`）。
@@ -120,3 +120,21 @@ docker-compose down && docker-compose up --build -d
 # 验证 GCC, Math 库 (-lm) 和 Zlib (-lz)
 docker exec testcase-gen-test sh -c 'echo "#include <zlib.h>\nint main(){return 0;}" > /tmp/check.c && gcc /tmp/check.c -o /tmp/check -lz && echo "Environment OK"'
 ```
+
+## 7. Python 运行时说明（针对 Python 测试支持）
+
+本项目已支持对 Python 项目的测试生成与执行。后端容器需要提供 `python3`、`venv` 与开发头文件用于创建虚拟环境并安装依赖。
+
+- 镜像中已安装 `python3-venv` 与 `python3-dev`（在 `Dockerfile.backend` 中）。
+- 运行时会在任务目录创建 `.venv` 并使用 `pip` 安装 `pytest` 与 `coverage`。为限制安装/执行时间，可通过环境变量调整超时：
+  - `PYTHON_VENV_TIMEOUT` (默认 30 秒)
+  - `PYTHON_INSTALL_TIMEOUT` (默认 120 秒)
+  - `PYTEST_TIMEOUT` (默认 60 秒)
+
+示例：设置较短的 pytest 超时（容器运行时）：
+
+```bash
+docker run -d -p 8007:8000 -e PYTEST_TIMEOUT=30 -v $(pwd)/workspaces:/app/workspaces testcase-gen:latest
+```
+
+注意：默认行为会在检测到 `requirements.txt` 时尝试安装依赖。为降低风险，可以在容器镜像中预装常用依赖或使用私有 PyPI 镜像来控制安装源。

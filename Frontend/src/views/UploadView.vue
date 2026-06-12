@@ -3,8 +3,8 @@
     <div class="max-w-4xl mx-auto space-y-8">
       <!-- Header -->
       <div class="text-center space-y-2">
-        <h1 class="text-3xl font-bold text-slate-900">开始测试您的 C 项目</h1>
-        <p class="text-slate-500 font-medium">上传 .c 单文件或 .zip 压缩包以开始自动化单元测试生成</p>
+        <h1 class="text-3xl font-bold text-slate-900">开始测试您的项目</h1>
+        <p class="text-slate-500 font-medium">支持 C 或 Python 项目，上传源码文件或 .zip 压缩包以开始自动化测试生成</p>
       </div>
 
       <!-- Upload Card -->
@@ -16,14 +16,14 @@
           @dragover.prevent
           @drop.prevent="handleDrop"
         >
-          <input type="file" ref="fileInput" class="hidden" @change="handleFileChange" accept=".c,.h,.zip" />
+          <input type="file" ref="fileInput" class="hidden" @change="handleFileChange" accept=".c,.h,.py,.zip" />
           <div class="flex flex-col items-center space-y-4">
             <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center group-hover:bg-primary-50 transition-colors">
               <Upload class="w-8 h-8 text-slate-400 group-hover:text-primary-600" />
             </div>
             <div class="space-y-1">
               <p class="text-lg font-bold text-slate-700">点击或拖拽文件至此处上传</p>
-              <p class="text-sm text-slate-500">支持 .c, .h 或包含项目的 .zip 文件</p>
+              <p class="text-sm text-slate-500">支持 .c, .h, .py 或包含项目的 .zip 文件</p>
             </div>
           </div>
         </div>
@@ -33,7 +33,7 @@
           <div class="flex items-center justify-between p-4 bg-white border border-slate-200 rounded-lg">
             <div class="flex items-center space-x-4">
               <div class="w-12 h-12 bg-primary-50 rounded flex items-center justify-center">
-                <FileCode class="w-7 h-7 text-primary-600" v-if="selectedFile.name.endsWith('.c')" />
+                <FileCode class="w-7 h-7 text-primary-600" v-if="selectedFile.name.endsWith('.c') || selectedFile.name.endsWith('.py')" />
                 <Package class="w-7 h-7 text-primary-600" v-else />
               </div>
               <div>
@@ -299,8 +299,8 @@ const uploadFile = async () => {
       }
     })
     
-    const { project_id, project_name } = response.data
-    store.setProject(project_id, project_name)
+    const { project_id, project_name, language, test_framework } = response.data
+    store.setProject(project_id, project_name, language, test_framework)
 
     if (enableBatchTest.value) {
        await startBatchTesting(project_id)
@@ -375,8 +375,7 @@ const startBatchTesting = async (projectId) => {
             // Generate
             const genRes = await axios.post('/api/testcase/generate', {
               project_id: projectId,
-              function_id: func.function_id,
-              test_framework: 'unity'
+              function_id: func.function_id
             })
             batchStatus.value.generated++
             
@@ -439,7 +438,7 @@ const fetchProjects = async () => {
 }
 
 const selectProject = (project) => {
-  store.setProject(project.project_id, project.project_name)
+  store.setProject(project.project_id, project.project_name, project.language, project.test_framework)
   router.push('/dashboard')
 }
 

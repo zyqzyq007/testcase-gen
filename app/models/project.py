@@ -12,15 +12,24 @@ class FunctionInfo(BaseModel):
     start_line: int
     end_line: int
     signature: str
+    language: Optional[str] = None
+    qualified_name: Optional[str] = None
+    class_name: Optional[str] = None
+    is_method: Optional[bool] = False
+    is_async: Optional[bool] = False
+    target_kind: Optional[str] = "function"
 
 class FileStructure(BaseModel):
     file_id: str
     path: str
-    file_type: Optional[str] = "c"   # "c", "h", "json", etc.
+    file_type: Optional[str] = "c"   # "c", "h", "py", "json", etc.
+    language: Optional[str] = None
     functions: List[FunctionInfo]
 
 class ProjectStructure(BaseModel):
     project_id: str
+    language: Optional[str] = None
+    test_framework: Optional[str] = None
     files: List[FileStructure]
 
 class UploadResponse(BaseModel):
@@ -29,6 +38,9 @@ class UploadResponse(BaseModel):
     file_count: int
     status: str
     source: Optional[str] = None  # "local" = 私有卷上传; "uniportal" = UniPortal 共享卷
+    language: Optional[str] = None
+    test_framework: Optional[str] = None
+    dependency_manager: Optional[str] = None
 
 class TestTargetFunctionInfo(BaseModel):
     function_id: str
@@ -41,6 +53,12 @@ class TestTargetFunctionInfo(BaseModel):
     header_file: Optional[str] = None
     declared_in_header: Optional[bool] = None
     reason: Optional[str] = None
+    language: Optional[str] = None
+    qualified_name: Optional[str] = None
+    class_name: Optional[str] = None
+    is_method: Optional[bool] = False
+    is_async: Optional[bool] = False
+    target_kind: Optional[str] = "function"
 
 class TestTargetStats(BaseModel):
     must_test_count: int

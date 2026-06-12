@@ -24,6 +24,17 @@ app.include_router(testcase.router)
 app.include_router(project.router)
 app.include_router(config.router)
 
+
+@app.on_event("startup")
+async def init_shared_output():
+    """确保共享卷 unit-test-generate 输出目录存在，供其他工具读取结果。"""
+    storage = os.getenv("UNIPORTAL_STORAGE_PATH")
+    if storage and os.path.isdir(storage):
+        out_dir = os.path.join(storage, "unit-test-generate")
+        os.makedirs(out_dir, exist_ok=True)
+        print(f"[startup] Shared output dir ready: {out_dir}", flush=True)
+
+
 @app.get("/api/health")
 async def health_check():
     return {"message": "C Unit Test Generator API is running"}

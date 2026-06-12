@@ -255,8 +255,7 @@ const start = async () => {
             // ── 第一步：生成测试用例 ──
             const genRes = await axios.post('/api/testcase/generate', {
               project_id: props.projectId,
-              function_id: func.function_id,
-              test_framework: 'unity'
+              function_id: func.function_id
             }, {
               signal: abortController.signal
             })

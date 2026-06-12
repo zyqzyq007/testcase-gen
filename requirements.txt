@@ -7,3 +7,4 @@ openai>=1.0
 aiofiles
 pydantic
 python-dotenv
+python-docx

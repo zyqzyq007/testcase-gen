@@ -4,7 +4,7 @@ import uuid
 import zipfile
 from datetime import datetime
 from fastapi import UploadFile, HTTPException
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 
 # 源码读取目录：集成模式下指向共享卷（只读），独立模式下指向本地 workspaces/
 WORKSPACES_DIR = os.path.abspath(os.getenv("UNIPORTAL_STORAGE_PATH", "workspaces"))
@@ -16,6 +16,72 @@ LOCAL_WORKSPACES_DIR = os.path.abspath(os.getenv("LOCAL_WORKSPACES_DIR", "worksp
 import json
 
 class ProjectService:
+    @staticmethod
+    def _default_framework_for_language(language: str) -> str:
+        return "pytest" if language == "python" else "unity"
+
+    @staticmethod
+    def _scan_project_characteristics(project_dir: str) -> Dict[str, Any]:
+        counts = {
+            "c": 0,
+            "h": 0,
+            "py": 0,
+            "json": 0,
+        }
+        files_seen = set()
+        dependency_manager = "pip"
+
+        for root, dirs, files in os.walk(project_dir):
+            dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "__pycache__", "node_modules", "_cache", "_tasks", ".pytest_cache"}]
+            for f in files:
+                rel_path = os.path.relpath(os.path.join(root, f), project_dir)
+                files_seen.add(rel_path)
+                lower = f.lower()
+                if lower.endswith(".c"):
+                    counts["c"] += 1
+                elif lower.endswith(".h"):
+                    counts["h"] += 1
+                elif lower.endswith(".py"):
+                    counts["py"] += 1
+                elif lower.endswith(".json"):
+                    counts["json"] += 1
+
+        if "pyproject.toml" in files_seen:
+            dependency_manager = "pyproject"
+        elif "requirements.txt" in files_seen:
+            dependency_manager = "pip"
+
+        language = "c"
+        if counts["py"] > 0 and counts["py"] >= counts["c"]:
+            language = "python"
+        elif counts["c"] == 0 and counts["py"] == 0:
+            language = "unknown"
+
+        source_count = counts["py"] if language == "python" else (counts["c"] + counts["h"])
+
+        return {
+            "language": language,
+            "dependency_manager": dependency_manager,
+            "counts": counts,
+            "source_count": source_count,
+        }
+
+    @staticmethod
+    def _meta_path(project_id: str) -> str:
+        base_dir = LOCAL_WORKSPACES_DIR if UNIPORTAL_MODE else WORKSPACES_DIR
+        return os.path.join(base_dir, project_id, "meta.json")
+
+    @staticmethod
+    def get_project_meta(project_id: str) -> Dict[str, Any]:
+        meta_path = ProjectService._meta_path(project_id)
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
     @staticmethod
     async def create_project(file: UploadFile, project_name: str = None) -> Tuple[str, str, int]:
         project_id = f"proj_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
@@ -39,19 +105,9 @@ class ProjectService:
                 zip_ref.extractall(project_dir)
             # Remove the zip file after extraction
             os.remove(file_location)
-            
-            # Count files
-            for root, dirs, files in os.walk(project_dir):
-                for f in files:
-                    if f.endswith(('.c', '.h')):
-                        file_count += 1
         else:
-            # Single file
-            if file.filename.endswith(('.c', '.h')):
+            if file.filename.endswith(('.c', '.h', '.py')):
                 file_count = 1
-            else:
-                # Should we reject? For now allow but count is 0 if not c/h
-                pass
 
         # Scan for function design documents (JSON files with function_design structure)
         design_docs = {}
@@ -77,28 +133,46 @@ class ProjectService:
                 except Exception:
                     pass
 
+        scan_info = ProjectService._scan_project_characteristics(project_dir)
+        language = scan_info["language"]
+        dependency_manager = scan_info["dependency_manager"]
+        test_framework = ProjectService._default_framework_for_language(language)
+        file_count = scan_info["source_count"]
+
         # Save metadata
         meta = {
             "project_name": project_name,
             "created_at": datetime.now().isoformat(),
             "original_filename": file.filename,
-            "design_docs": design_docs
+            "design_docs": design_docs,
+            "language": language,
+            "test_framework": test_framework,
+            "dependency_manager": dependency_manager,
         }
-        with open(os.path.join(project_dir, "meta.json"), "w") as f:
+        with open(os.path.join(project_dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
         return project_id, project_name, file_count
 
     @staticmethod
-    def get_function_design_doc(project_id: str, function_name: str) -> dict:
+    def get_function_design_doc(project_id: str, function_name: str, qualified_name: str = None) -> dict:
         """
         按函数名查找项目中的设计文档（function_design 结构）。
+        优先查找 function_name，其次尝试 qualified_name（Python 类方法）。
         优先从 meta.json 中读取上传时扫描到的 design_docs，
         若 meta.json 不含该字段则实时扫描项目目录中的 JSON 文件。
         返回 function_design 字典，未找到则返回 None。
         """
         if not function_name:
             return None
+
+        # 构建候选名列表：优先精确名，再尝试 Python qualified name
+        candidates = [function_name]
+        if qualified_name and qualified_name != function_name:
+            candidates.append(qualified_name)
+            # 也尝试用 "." 替换 "__" 的形式（有些设计文档用 Python module 风格）
+            candidates.append(qualified_name.replace(".", "__"))
+
         # Try reading from meta.json first (fastest path)
         base_dir = LOCAL_WORKSPACES_DIR if UNIPORTAL_MODE else WORKSPACES_DIR
         meta_path = os.path.join(base_dir, project_id, "meta.json")
@@ -106,8 +180,10 @@ class ProjectService:
             try:
                 with open(meta_path, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
-                if 'design_docs' in meta and function_name in meta['design_docs']:
-                    return meta['design_docs'][function_name]
+                if 'design_docs' in meta:
+                    for candidate in candidates:
+                        if candidate in meta['design_docs']:
+                            return meta['design_docs'][candidate]
             except Exception:
                 pass
         # Fallback: live scan of JSON files in the project directory
@@ -130,7 +206,8 @@ class ProjectService:
                         entries = [item for item in data if isinstance(item, dict) and 'function_design' in item]
                     for entry in entries:
                         fd = entry['function_design']
-                        if fd.get('basic_info', {}).get('function_name', '').strip() == function_name:
+                        doc_name = fd.get('basic_info', {}).get('function_name', '').strip()
+                        if doc_name in candidates:
                             return fd
                 except Exception:
                     pass
@@ -233,13 +310,17 @@ class ProjectService:
     def list_files(project_id: str) -> List[str]:
         project_dir = ProjectService.get_project_path(project_id)
         file_paths = []
-        for root, _, files in os.walk(project_dir):
+        for root, dirs, files in os.walk(project_dir):
+            # 不展示系统缓存目录 _cache 和任务目录 _tasks
+            dirs[:] = [d for d in dirs if d not in {"_cache", "_tasks", ".git", "__pycache__", ".venv", "venv", "node_modules", ".pytest_cache"}]
             for file in files:
-                if file.endswith(('.c', '.h', '.json')):
+                if file.endswith(('.c', '.h', '.py', '.json', '.toml', '.txt')):
                     # Skip meta.json at the project root
                     full = os.path.join(root, file)
                     rel_path = os.path.relpath(full, project_dir)
                     if rel_path == 'meta.json':
+                        continue
+                    if file not in {"requirements.txt", "pyproject.toml", "pytest.ini", "setup.py"} and not file.endswith(('.c', '.h', '.py', '.json')):
                         continue
                     file_paths.append(rel_path)
         return sorted(file_paths)
@@ -260,40 +341,57 @@ class ProjectService:
 
     @staticmethod
     def get_project_name(project_id: str) -> str:
-        # 集成模式下本地上传的项目存放在 LOCAL_WORKSPACES_DIR
-        base_dir = LOCAL_WORKSPACES_DIR if UNIPORTAL_MODE else WORKSPACES_DIR
-        project_dir = os.path.join(base_dir, project_id)
-        meta_path = os.path.join(project_dir, "meta.json")
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r") as f:
-                    meta = json.load(f)
-                    return meta.get("project_name", project_id)
-            except:
-                pass
-        
+        meta = ProjectService.get_project_meta(project_id)
+        if meta.get("project_name"):
+            return meta["project_name"]
+
+        # Use the actual source directory (not LOCAL_WORKSPACES_DIR which only has artifacts)
+        try:
+            project_dir = ProjectService.get_project_path(project_id)
+        except Exception:
+            project_dir = os.path.join(LOCAL_WORKSPACES_DIR if UNIPORTAL_MODE else WORKSPACES_DIR, project_id)
+
         # Fallback for old projects: try to find a meaningful name
         try:
             items = os.listdir(project_dir)
-            # 1. If there's a single directory, use it
-            dirs = [d for d in items if os.path.isdir(os.path.join(project_dir, d)) and not d.startswith(('_', '.'))]
+            # 1. If there's a single directory, use it (exclude generated artifact dirs)
+            dirs = [d for d in items
+                    if os.path.isdir(os.path.join(project_dir, d))
+                    and not d.startswith(('_', '.'))
+                    and d not in {"graphs", "__pycache__", ".venv", "venv"}]
             if len(dirs) == 1:
                 return dirs[0]
-            
-            # 2. Look for any .c file and use its parent directory name if it's not the project root
+
+            # 2. Look for any .c or .py file and use its parent directory name
             for root, _, files in os.walk(project_dir):
-                c_files = [f for f in files if f.endswith('.c')]
-                if c_files:
+                src_files = [f for f in files if f.endswith(('.c', '.py'))]
+                if src_files:
                     rel_dir = os.path.relpath(root, project_dir)
                     if rel_dir != '.':
                         return rel_dir.split(os.sep)[0]
-                    return c_files[0].split('.')[0]
+                    return src_files[0].split('.')[0]
         except:
             pass
 
         # 3. Last resort: use the random part of the ID instead of the date
         parts = project_id.split('_')
         return parts[-1] if len(parts) > 1 else project_id
+
+    @staticmethod
+    def get_project_language(project_id: str) -> str:
+        meta = ProjectService.get_project_meta(project_id)
+        if meta.get("language"):
+            return meta["language"]
+        project_dir = ProjectService.get_project_path(project_id)
+        scan_info = ProjectService._scan_project_characteristics(project_dir)
+        return scan_info["language"]
+
+    @staticmethod
+    def get_project_framework(project_id: str) -> str:
+        meta = ProjectService.get_project_meta(project_id)
+        if meta.get("test_framework"):
+            return meta["test_framework"]
+        return ProjectService._default_framework_for_language(ProjectService.get_project_language(project_id))
 
     @staticmethod
     def delete_project(project_id: str) -> bool:
@@ -358,7 +456,7 @@ class ProjectService:
                 # 未指定工程：不列出任何 UniPortal 项目（仅显示下方私有上传）
                 index = {}
             for item_id, item_path in sorted(index.items()):
-                file_count = 0
+                scan_info = ProjectService._scan_project_characteristics(item_path)
                 display_name = item_id  # 兜底用 item_id
                 try:
                     sub_dirs = [
@@ -370,16 +468,15 @@ class ProjectService:
                         display_name = sub_dirs[0]  # 取第一个子目录名作为展示名
                 except Exception:
                     pass
-                for root, _, files in os.walk(item_path):
-                    for f in files:
-                        if f.endswith(('.c', '.h')):
-                            file_count += 1
                 projects.append({
                     "project_id": item_id,
                     "project_name": display_name,
-                    "file_count": file_count,
+                    "file_count": scan_info["source_count"],
                     "status": "available",
-                    "source": "uniportal"
+                    "source": "uniportal",
+                    "language": scan_info["language"],
+                    "test_framework": ProjectService._default_framework_for_language(scan_info["language"]),
+                    "dependency_manager": scan_info["dependency_manager"],
                 })
 
             # 合并本工具私有目录中用户自行上传的项目（proj_ 前缀）
@@ -387,36 +484,36 @@ class ProjectService:
                 for d in os.listdir(LOCAL_WORKSPACES_DIR):
                     path = os.path.join(LOCAL_WORKSPACES_DIR, d)
                     if os.path.isdir(path) and d.startswith("proj_"):
-                        file_count = 0
-                        for root, _, files in os.walk(path):
-                            for f in files:
-                                if f.endswith(('.c', '.h')):
-                                    file_count += 1
+                        meta = ProjectService.get_project_meta(d)
+                        scan_info = ProjectService._scan_project_characteristics(path)
                         project_name = ProjectService.get_project_name(d)
                         projects.append({
                             "project_id": d,
                             "project_name": project_name,
-                            "file_count": file_count,
+                            "file_count": scan_info["source_count"],
                             "status": "available",
-                            "source": "local"
+                            "source": "local",
+                            "language": meta.get("language", scan_info["language"]),
+                            "test_framework": meta.get("test_framework", ProjectService._default_framework_for_language(scan_info["language"])),
+                            "dependency_manager": meta.get("dependency_manager", scan_info["dependency_manager"]),
                         })
         else:
             # 独立模式：目录结构为 proj_YYYYMMDD_xxxx/
             for d in os.listdir(WORKSPACES_DIR):
                 path = os.path.join(WORKSPACES_DIR, d)
                 if os.path.isdir(path) and d.startswith("proj_"):
-                    file_count = 0
-                    for root, _, files in os.walk(path):
-                        for f in files:
-                            if f.endswith(('.c', '.h')):
-                                file_count += 1
+                    meta = ProjectService.get_project_meta(d)
+                    scan_info = ProjectService._scan_project_characteristics(path)
                     project_name = ProjectService.get_project_name(d)
                     projects.append({
                         "project_id": d,
                         "project_name": project_name,
-                        "file_count": file_count,
+                        "file_count": scan_info["source_count"],
                         "status": "available",
-                        "source": "local"
+                        "source": "local",
+                        "language": meta.get("language", scan_info["language"]),
+                        "test_framework": meta.get("test_framework", ProjectService._default_framework_for_language(scan_info["language"])),
+                        "dependency_manager": meta.get("dependency_manager", scan_info["dependency_manager"]),
                     })
             projects = sorted(projects, key=lambda x: x['project_id'], reverse=True)
 

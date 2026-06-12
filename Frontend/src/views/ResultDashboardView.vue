@@ -14,9 +14,13 @@
           <button @click="fetchSummary" class="p-2 text-slate-500 hover:bg-slate-100 rounded transition-colors" title="刷新">
             <RotateCw class="w-5 h-5" :class="{'animate-spin': loading}" />
           </button>
+          <button @click="exportDocx" :disabled="exporting || functions.length === 0" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg transition-colors text-sm flex items-center gap-1.5">
+            <Download class="w-4 h-4" />
+            {{ exporting ? '导出中...' : '导出 DOCX' }}
+          </button>
           <button @click="exportJson" :disabled="exporting || functions.length === 0" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg transition-colors text-sm flex items-center gap-1.5">
             <Download class="w-4 h-4" />
-            {{ exporting ? '导出中...' : '导出 JSON' }}
+            JSON
           </button>
           <button @click="router.push('/browse')" class="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg transition-colors text-sm">
             进入项目浏览
@@ -177,7 +181,9 @@ const exportJson = async () => {
   if (!store.projectId) return
   exporting.value = true
   try {
-    const res = await axios.get(`/api/project/${store.projectId}/export?t=${Date.now()}`)
+    const params = { t: Date.now() }
+    if (store.portalProjectId) params.portal_project_id = store.portalProjectId
+    const res = await axios.get(`/api/project/${store.projectId}/export`, { params })
     const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -192,6 +198,36 @@ const exportJson = async () => {
   } catch (e) {
     console.error('Export failed:', e)
     alert('导出失败，请稍后重试')
+  } finally {
+    exporting.value = false
+  }
+}
+
+const exportDocx = async () => {
+  if (!store.projectId) return
+  exporting.value = true
+  try {
+    const res = await axios.get(`/api/project/${store.projectId}/export-docx?t=${Date.now()}`)
+    const { content, filename } = res.data
+    // base64 decode
+    const byteChars = atob(content)
+    const byteNums = new Array(byteChars.length)
+    for (let i = 0; i < byteChars.length; i++) {
+      byteNums[i] = byteChars.charCodeAt(i)
+    }
+    const byteArr = new Uint8Array(byteNums)
+    const blob = new Blob([byteArr], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename || 'test_report.docx'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    console.error('Export DOCX failed:', e)
+    alert('导出 DOCX 失败，请稍后重试')
   } finally {
     exporting.value = false
   }

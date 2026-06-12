@@ -16,10 +16,10 @@ services:
     image: testcase-gen
     container_name: testcase-gen
     ports:
-      - "8007:8000"
+      - "8004:8000"
     volumes:
-      # UniPortal 共享卷（只读）
-      - uniportal_storage:/data/uniportal:ro
+      # UniPortal 共享卷
+      - uniportal_storage:/data/uniportal
       # 本工具私有：cpg.bin、graphs/、_cache/（可读写）
       - tool_local:/app/local_workspaces
       # 本工具私有：任务沙盒（可读写）

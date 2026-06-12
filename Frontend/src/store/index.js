@@ -16,6 +16,8 @@ export const useAppStore = defineStore('app', {
   state: () => ({
     projectId: localStorage.getItem('projectId') || null,
     projectName: localStorage.getItem('projectName') || null,
+    projectLanguage: localStorage.getItem('projectLanguage') || null,
+    testFramework: localStorage.getItem('testFramework') || null,
     functionId: localStorage.getItem('functionId') || null,
     functionName: localStorage.getItem('functionName') || null,
     taskId: localStorage.getItem('taskId') || null,
@@ -28,11 +30,17 @@ export const useAppStore = defineStore('app', {
       this.failureContext = context
       this.failedTaskId = taskId
     },
-    setProject(id, name) {
+    setProject(id, name, language = null, framework = null) {
       this.projectId = id
       this.projectName = name
+      this.projectLanguage = language
+      this.testFramework = framework
       localStorage.setItem('projectId', id)
       localStorage.setItem('projectName', name)
+      if (language) localStorage.setItem('projectLanguage', language)
+      else localStorage.removeItem('projectLanguage')
+      if (framework) localStorage.setItem('testFramework', framework)
+      else localStorage.removeItem('testFramework')
       // Reset dependent states
       this.setFunction(null, null)
       this.setTask(null)
@@ -57,6 +65,14 @@ export const useAppStore = defineStore('app', {
       } else {
         localStorage.removeItem('taskId')
       }
+    },
+    setProjectMeta(language = null, framework = null) {
+      this.projectLanguage = language
+      this.testFramework = framework
+      if (language) localStorage.setItem('projectLanguage', language)
+      else localStorage.removeItem('projectLanguage')
+      if (framework) localStorage.setItem('testFramework', framework)
+      else localStorage.removeItem('testFramework')
     }
   }
 })

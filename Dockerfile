@@ -22,9 +22,14 @@ ENV PATH="${JOERN_HOME}:${PATH}"
 # - Graphviz for generating graphs
 # - curl, unzip, wget for downloading tools
 # - lcov for coverage reports
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources \
+# Workaround for Docker seccomp/GPG issue: use .list format with trusted=yes
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf 'deb [trusted=yes] http://mirrors.aliyun.com/debian bookworm main bookworm-updates\n' > /etc/apt/sources.list.d/debian.list \
+    && printf 'deb [trusted=yes] http://mirrors.aliyun.com/debian-security bookworm-security main\n' >> /etc/apt/sources.list.d/debian.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         openjdk-17-jdk \
+        python3-venv \
+        python3-dev \
         build-essential \
         zlib1g-dev \
         libssl-dev \

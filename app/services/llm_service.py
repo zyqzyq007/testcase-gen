@@ -303,6 +303,7 @@ class LLMService:
 
     @staticmethod
     def _build_test_prompt(
+        language: str,
         project_context: str,
         function_code: str,
         code_graph: Dict[str, Any],
@@ -312,8 +313,23 @@ class LLMService:
         function_intent: Optional[str],
         prior_test_code: Optional[str],
         design_doc: Optional[dict],
+        requirement_context: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """Build the (prompt, max_tokens) tuple for test-case generation."""
+        if language == "python":
+            return LLMService._build_python_test_prompt(
+                project_context,
+                function_code,
+                code_graph,
+                file_code,
+                test_framework,
+                failure_context,
+                function_intent,
+                prior_test_code,
+                design_doc,
+                requirement_context,
+            )
+
         failure_info = ""
         if failure_context:
             failure_info = (
@@ -336,6 +352,7 @@ class LLMService:
             )
 
         design_doc_info = LLMService._format_design_doc(design_doc) if design_doc else ""
+        requirement_info = LLMService._format_requirement_context(requirement_context) if requirement_context else ""
         complexity_instruction, max_tokens = LLMService._assess_complexity(function_code)
 
         prompt = f"""
@@ -343,6 +360,7 @@ You are an expert C developer. Generate a unit test file using the {test_framewo
 
 {intent_info}
 {design_doc_info}
+{requirement_info}
 {failure_info}
 
 Target Function:
@@ -396,8 +414,22 @@ Requirements:
    }}
    ```
    Files without `main()` will fail to link and are considered invalid output.
-10. Output ONLY the C code for the test file. Wrap it in a ```c block.
-11. Ensure the code compiles with standard Unity setup and includes ALL necessary standard headers:
+10. ⚠️ **SEMANTIC COMMENTS REQUIRED (ISO/IEC/IEEE 29119)**: Before EACH `void test_*` function, write a Chinese comment block using the 29119 three-part structure:
+    - // Objective（必需）：测试目标描述 — what this specific test validates
+    - // Preconditions（可选）：前置条件 — input values, state setup
+    - // Expected Results（可选）：预期结果 — expected return value, side effects
+    Format as:
+    ```
+    // Objective：验证<具体场景>时，<被测行为>
+    // Preconditions：<输入参数/前置状态>
+    // Expected Results：<预期返回值/副作用>
+    void test_xxx(void) {{
+        ...
+    }}
+    ```
+    If Preconditions or Expected Results are obvious from the Objective, they can be omitted, but Objective is MANDATORY for every test function. This is mandatory for test documentation.
+11. Output ONLY the C code for the test file. Wrap it in a ```c block.
+12. Ensure the code compiles with standard Unity setup and includes ALL necessary standard headers:
     - `<stdarg.h>` if you use `va_list`, `va_start`, `va_end`, `va_arg`
     - `<string.h>` if you use `strcmp`, `strlen`, `memcpy` etc.
     - `<stdlib.h>` if you use `malloc`, `free` etc.
@@ -405,6 +437,90 @@ Requirements:
 """
         if os.getenv("LLM_DEBUG_PROMPT") == "1":
             print(f"DEBUG: LLM Prompt:\n{prompt}")
+        return prompt, max_tokens
+
+    @staticmethod
+    def _build_python_test_prompt(
+        project_context: str,
+        function_code: str,
+        code_graph: Dict[str, Any],
+        file_code: str,
+        test_framework: str,
+        failure_context: Optional[str],
+        function_intent: Optional[str],
+        prior_test_code: Optional[str],
+        design_doc: Optional[dict] = None,
+        requirement_context: Optional[Dict[str, Any]] = None,
+    ) -> tuple:
+        max_tokens = 2600
+        failure_info = ""
+        if failure_context:
+            failure_info = (
+                "\n### FAILURE CONTEXT:\n"
+                "The previous pytest attempt failed. Generate a corrected test.\n"
+            )
+            if prior_test_code:
+                failure_info += f"\nPrevious Test Code:\n```python\n{prior_test_code}\n```\n"
+            failure_info += f"\nFailure Details:\n{failure_context}\n"
+
+        intent_info = ""
+        if function_intent:
+            intent_info = f"\n### FUNCTION INTENT:\n{function_intent}\n"
+
+        design_doc_info = LLMService._format_design_doc(design_doc) if design_doc else ""
+        requirement_info = LLMService._format_requirement_context(requirement_context) if requirement_context else ""
+
+        prompt = f"""
+You are an expert Python test engineer. Generate a {test_framework} test file for the following Python target.
+
+{intent_info}
+{design_doc_info}
+{requirement_info}
+{failure_info}
+
+Target Code:
+```python
+{function_code}
+```
+
+Full File Content:
+```python
+{file_code}
+```
+
+Project Context:
+{project_context}
+
+Code Graph Info:
+{json.dumps(code_graph, indent=2)}
+
+Requirements:
+1. Output ONLY Python code wrapped in a ```python block.
+2. Use pytest style tests.
+3. Prefer direct imports from the target module.
+4. Keep the file concise: 2-4 focused tests are enough.
+5. Use pytest.raises for exception cases.
+6. Do not add explanations or markdown outside the code block.
+7. Do not redefine the target implementation inside the test file.
+8. If the target is a class method, instantiate the class only if necessary.
+9. If mocking is required, use unittest.mock.patch sparingly.
+10. The test file must be directly executable by pytest.
+11. ⚠️ **SEMANTIC COMMENTS REQUIRED (ISO/IEC/IEEE 29119)**: Before EACH `def test_*` function, write a Chinese comment block using the 29119 three-part structure:
+    - # Objective（必需）：测试目标描述 — what this specific test validates
+    - # Preconditions（可选）：前置条件 — input values, state setup, mock configuration
+    - # Expected Results（可选）：预期结果 — expected return value, state change, exception type
+    Format as:
+    ```
+    # Objective：验证<具体场景>时，<被测行为>
+    # Preconditions：<输入参数/前置状态/mock设置>
+    # Expected Results：<预期返回值/异常类型/副作用>
+    def test_xxx():
+        ...
+    ```
+    If Preconditions or Expected Results are obvious from the Objective, they can be omitted, but Objective is MANDATORY for every test function. This is mandatory for test documentation.
+"""
+        if os.getenv("LLM_DEBUG_PROMPT") == "1":
+            print(f"DEBUG: Python LLM Prompt:\n{prompt}")
         return prompt, max_tokens
 
     _TEST_SYSTEM_MSG = (
@@ -415,6 +531,7 @@ Requirements:
 
     @staticmethod
     async def generate_test_case_stream(
+        language: str,
         project_context: str,
         function_code: str,
         code_graph: Dict[str, Any],
@@ -424,21 +541,27 @@ Requirements:
         function_intent: str = None,
         prior_test_code: str = None,
         design_doc: dict = None,
+        requirement_context: dict = None,
     ):
         prompt, max_tokens = LLMService._build_test_prompt(
-            project_context, function_code, code_graph, file_code, test_framework,
-            failure_context, function_intent, prior_test_code, design_doc,
+            language, project_context, function_code, code_graph, file_code, test_framework,
+            failure_context, function_intent, prior_test_code, design_doc, requirement_context,
         )
 
         if _is_mock_mode():
-            mock_code = LLMService._generate_mock_test(function_code)
+            mock_code = LLMService._generate_mock_test(function_code, language=language)
             for char in mock_code:
                 yield char
                 await asyncio.sleep(0.001)
             return
 
+        system_msg = (
+            "You are a concise Python pytest generator. Produce only valid pytest code."
+            if language == "python"
+            else LLMService._TEST_SYSTEM_MSG
+        )
         messages = [
-            {"role": "system", "content": LLMService._TEST_SYSTEM_MSG},
+            {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt},
         ]
         async for chunk in LLMService._chat_stream(
@@ -452,6 +575,7 @@ Requirements:
 
     @staticmethod
     async def generate_test_case(
+        language: str,
         project_context: str,
         function_code: str,
         code_graph: Dict[str, Any],
@@ -461,17 +585,23 @@ Requirements:
         function_intent: str = None,
         prior_test_code: str = None,
         design_doc: dict = None,
+        requirement_context: dict = None,
     ) -> str:
         prompt, max_tokens = LLMService._build_test_prompt(
-            project_context, function_code, code_graph, file_code, test_framework,
-            failure_context, function_intent, prior_test_code, design_doc,
+            language, project_context, function_code, code_graph, file_code, test_framework,
+            failure_context, function_intent, prior_test_code, design_doc, requirement_context,
         )
 
         if _is_mock_mode():
-            return LLMService._generate_mock_test(function_code)
+            return LLMService._generate_mock_test(function_code, language=language)
 
+        system_msg = (
+            "You are a concise Python pytest generator. Produce only valid pytest code."
+            if language == "python"
+            else LLMService._TEST_SYSTEM_MSG
+        )
         messages = [
-            {"role": "system", "content": LLMService._TEST_SYSTEM_MSG},
+            {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt},
         ]
         content = await LLMService._chat_once(
@@ -481,11 +611,31 @@ Requirements:
             top_p=0.1,
         )
         if content is None:
-            return LLMService._generate_mock_test(function_code)
+            return LLMService._generate_mock_test(function_code, language=language)
         return LLMService._extract_code(content)
 
     @staticmethod
-    def _build_intent_prompt(function_code: str, project_context: str) -> str:
+    def _build_intent_prompt(function_code: str, project_context: str, language: str = "c") -> str:
+        if language == "python":
+            return f"""
+You are an expert Python developer. Analyze the following Python target and describe its validation intention following ISO/IEC/IEEE 29119.
+
+Target Code:
+```python
+{function_code}
+```
+
+Project Context:
+{project_context}
+
+Requirements for the output format:
+1. Use a three-part structure with the following headers:
+   #Objective:
+   #Preconditions:
+   #Expected Results:
+2. Be concise and technical.
+3. Output ONLY the formatted intent description text.
+"""
         return f"""
 You are an expert C developer. Analyze the following C function and describe its validation intention following ISO/IEC/IEEE 29119.
 
@@ -509,9 +659,10 @@ Requirements for the output format:
     @staticmethod
     async def generate_function_intent_stream(
         function_code: str,
-        project_context: str = ""
+        project_context: str = "",
+        language: str = "c",
     ):
-        prompt = LLMService._build_intent_prompt(function_code, project_context)
+        prompt = LLMService._build_intent_prompt(function_code, project_context, language=language)
 
         if _is_mock_mode():
             mock_intent = "#Objective: Mock intent description for testing purposes.\n#Expected Results: 1. Success."
@@ -534,9 +685,10 @@ Requirements for the output format:
     @staticmethod
     async def generate_function_intent(
         function_code: str,
-        project_context: str = ""
+        project_context: str = "",
+        language: str = "c",
     ) -> str:
-        prompt = LLMService._build_intent_prompt(function_code, project_context)
+        prompt = LLMService._build_intent_prompt(function_code, project_context, language=language)
 
         if _is_mock_mode():
             return "#Objective: Mock intent description for testing purposes.\n#Expected Results: 1. Success."
@@ -551,6 +703,9 @@ Requirements for the output format:
     @staticmethod
     def _extract_code(text: str) -> str:
         match = re.search(r'```c\n(.*?)\n```', text, re.DOTALL)
+        if match:
+            return match.group(1)
+        match = re.search(r'```python\n(.*?)\n```', text, re.DOTALL)
         if match:
             return match.group(1)
         # Try without language specifier
@@ -608,6 +763,49 @@ Requirements for the output format:
         return "\n".join(lines)
 
     @staticmethod
+    def _format_requirement_context(req_ctx: dict) -> str:
+        """
+        将上游需求追溯上下文格式化为 LLM prompt 中的结构化文本段落。
+        req_ctx 来自 UpstreamService.get_requirement_context()。
+        """
+        if not req_ctx:
+            return ""
+
+        lines = [
+            "### REQUIREMENT CONTEXT (from upstream traceability & document validation tools):",
+            f"- Associated Requirement: {req_ctx.get('requirement_label', '')}",
+        ]
+
+        if req_ctx.get("requirement_title"):
+            lines.append(f"- Requirement Title: {req_ctx['requirement_title']}")
+
+        content = req_ctx.get("requirement_content", "")
+        if content:
+            lines.append(f"- Requirement Description: {content}")
+
+        tables = req_ctx.get("tables", [])
+        if tables:
+            lines.append("- Requirement Tables (input/output constraints):")
+            for tbl in tables:
+                headers = tbl.get("headers", [])
+                rows = tbl.get("rows", [])
+                if headers:
+                    lines.append(f"    Headers: {' | '.join(headers)}")
+                for row in rows:
+                    lines.append(f"    Row: {' | '.join(row)}")
+
+        if req_ctx.get("similarity") is not None:
+            lines.append(f"- Traceability Similarity: {req_ctx['similarity']:.2%}")
+
+        lines.append(
+            "\nIMPORTANT: Use the requirement context above to guide test case design. "
+            "Ensure tests cover the functional scenarios, input/output constraints, and "
+            "boundary conditions described in the requirement."
+        )
+        lines.append("")  # trailing blank line
+        return "\n".join(lines)
+
+    @staticmethod
     def _build_annotate_prompt(test_code: str, design_doc: dict, source_code: str) -> str:
         design_doc_info = LLMService._format_design_doc(design_doc)
         source_section = (
@@ -650,49 +848,107 @@ Requirements for the output format:
 3. 除了插入注释，**不做任何其他修改**。
 """
 
+    @staticmethod
+    def _build_python_annotate_prompt(test_code: str, design_doc: dict, source_code: str) -> str:
+        design_doc_info = LLMService._format_design_doc(design_doc)
+        source_section = (
+            f"\n被测函数源代码：\n```python\n{source_code}\n```\n" if source_code else ""
+        )
+        return f"""
+你是一位 Python 测试专家，同时也是代码审查员。下面提供了三份材料：
+1. 函数设计文档（规定了函数应有的行为）
+2. 被测函数的实际源代码
+3. 已生成的 pytest 单元测试代码
+
+{design_doc_info}
+{source_section}
+已有测试代码：
+```python
+{test_code}
+```
+
+你的任务分为**两个维度**：
+
+【维度A：注释插入】
+在每一条 `assert` 语句的紧下方，插入一行中文注释，格式为：
+`# [设计文档] 预期：<具体预期值或行为> | 原因：<针对该测试场景的分析——在此输入/条件下，设计文档的哪条规定（算法/流程步骤/返回值说明）决定了该输出>`
+
+注释中"原因"要求：
+- 必须结合当前测试场景（测试函数名、传入参数）进行具体分析
+- 不能只写"0表示正确"这类泛泛的描述
+- 若设计文档未覆盖此场景，写：`原因：设计文档未覆盖此场景，依据代码逻辑推断`
+
+对于 `pytest.raises(...)` 语句，紧下方注释为：
+`# [设计文档] 预期：抛出<异常类型> | 原因：<设计文档中哪条规定决定了该异常>`
+
+【维度B：缺陷检测】
+逐一对比：**设计文档规定的行为** vs **源代码的实际实现**。
+- 若发现源代码某处实现与设计文档存在偏差（如条件判断错误、返回值错误、流程顺序错误、边界处理缺失等），则：
+  1. 在对应 assert 的注释末尾追加 ` | ⚠️ 疑似缺陷：<简要描述源代码中哪行/哪个逻辑与设计文档不符>`
+  2. 若该缺陷会导致当前断言失败，在注释开头改为 `# [设计文档·缺陷] `
+- 若源代码与设计文档完全一致，不需要添加缺陷标注
+
+输出规则：
+1. **不要修改任何测试逻辑**，包括 assert 参数、测试函数名、fixture 等。
+2. 输出完整的、带注释的 Python 代码文件，用 ```python 代码块包裹。
+3. 除了插入注释，**不做任何其他修改**。
+"""
+
     _ANNOTATE_SYSTEM_MSG = "你是一位专业的 C 语言单元测试工程师。"
+    _ANNOTATE_PYTHON_SYSTEM_MSG = "你是一位专业的 Python 单元测试工程师。"
     _ANNOTATE_TIMEOUT = 90.0
 
     @staticmethod
-    def _mock_annotate(test_code: str) -> str:
+    def _mock_annotate(test_code: str, language: str = "c") -> str:
         lines = test_code.split('\n')
         result = []
+        comment_char = '#' if language == 'python' else '//'
+        trigger = 'assert' if language == 'python' else 'TEST_ASSERT'
         for line in lines:
             result.append(line)
-            if 'TEST_ASSERT' in line:
-                result.append('// [设计文档] 预期：见设计文档 | 原因：Mock 模式，无 API 密钥')
+            if trigger in line:
+                result.append(f'{comment_char} [设计文档] 预期：见设计文档 | 原因：Mock 模式，无 API 密钥')
         return '\n'.join(result)
 
     @staticmethod
     async def annotate_with_design_doc_stream(
         test_code: str,
         design_doc: dict,
-        source_code: str = ""
+        source_code: str = "",
+        language: str = "c"
     ):
         """
         第二步：给已生成的测试代码，基于设计文档在每条断言下插入中文注释。
         同时对比源代码与设计文档，若发现偏差则在注释中标注。
+        支持 C (Unity) 和 Python (pytest) 两种语言。
         """
-        prompt = LLMService._build_annotate_prompt(test_code, design_doc, source_code)
+        if language == "python":
+            prompt = LLMService._build_python_annotate_prompt(test_code, design_doc, source_code)
+            system_msg = LLMService._ANNOTATE_PYTHON_SYSTEM_MSG
+            error_template = "# Error annotating test case: {e}"
+        else:
+            prompt = LLMService._build_annotate_prompt(test_code, design_doc, source_code)
+            system_msg = LLMService._ANNOTATE_SYSTEM_MSG
+            error_template = "/* Error annotating test case: {e} */"
 
         if os.getenv("LLM_DEBUG_PROMPT") == "1":
             print(f"DEBUG: Annotate Prompt:\n{prompt}")
 
         if _is_mock_mode():
-            for char in LLMService._mock_annotate(test_code):
+            for char in LLMService._mock_annotate(test_code, language=language):
                 yield char
                 await asyncio.sleep(0.001)
             return
 
         messages = [
-            {"role": "system", "content": LLMService._ANNOTATE_SYSTEM_MSG},
+            {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt},
         ]
         async for chunk in LLMService._chat_stream(
             messages,
             temperature=0.2,
             timeout=LLMService._ANNOTATE_TIMEOUT,
-            error_template="/* Error annotating test case: {e} */",
+            error_template=error_template,
         ):
             yield chunk
 
@@ -700,22 +956,29 @@ Requirements for the output format:
     async def annotate_with_design_doc(
         test_code: str,
         design_doc: dict,
-        source_code: str = ""
+        source_code: str = "",
+        language: str = "c"
     ) -> str:
         """
         第二步（非流式版本）：给已生成的测试代码，基于设计文档在每条断言下插入中文注释。
         同时对比源代码与设计文档，若发现偏差则在注释中标注。
+        支持 C (Unity) 和 Python (pytest) 两种语言。
         """
-        prompt = LLMService._build_annotate_prompt(test_code, design_doc, source_code)
+        if language == "python":
+            prompt = LLMService._build_python_annotate_prompt(test_code, design_doc, source_code)
+            system_msg = LLMService._ANNOTATE_PYTHON_SYSTEM_MSG
+        else:
+            prompt = LLMService._build_annotate_prompt(test_code, design_doc, source_code)
+            system_msg = LLMService._ANNOTATE_SYSTEM_MSG
 
         if os.getenv("LLM_DEBUG_PROMPT") == "1":
             print(f"DEBUG: Annotate Prompt:\n{prompt}")
 
         if _is_mock_mode():
-            return LLMService._mock_annotate(test_code)
+            return LLMService._mock_annotate(test_code, language=language)
 
         messages = [
-            {"role": "system", "content": LLMService._ANNOTATE_SYSTEM_MSG},
+            {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt},
         ]
         content = await LLMService._chat_once(
@@ -764,10 +1027,18 @@ Requirements for the output format:
         return "  " + ", ".join(f"`{n}`" for n in names)
 
     @staticmethod
-    def _generate_mock_test(function_code: str) -> str:
+    def _generate_mock_test(function_code: str, language: str = "c") -> str:
         # Generate a dummy test based on function name
         func_name_match = re.search(r'([a-zA-Z0-9_]+)\s*\(', function_code)
         func_name = func_name_match.group(1) if func_name_match else "unknown"
+
+        if language == "python":
+            return f"""
+import pytest
+
+def test_{func_name}_basic():
+    pytest.skip("Mock test generated without API key")
+"""
 
         return f"""
 #include "unity.h"
@@ -792,3 +1063,612 @@ int main(void) {{
     return UNITY_END();
 }}
 """
+
+    # ── Document Export ──────────────────────────────────────────────────
+
+    @staticmethod
+    def generate_export_document(
+        *,
+        language: str,
+        function_name: str,
+        function_signature: str,
+        qualified_name: Optional[str],
+        class_name: Optional[str],
+        source_file: str,
+        source_code: str,
+        function_intent: str,
+        test_code: str,
+        design_doc: Optional[dict],
+        test_result: Optional[dict],
+        coverage: Optional[dict],
+        format: str = "markdown",
+    ) -> str:
+        """
+        Generate a test document (Markdown or HTML) that includes:
+        - Function basic info, signature, source code
+        - Design document (if available)
+        - Function intent (semantic meaning)
+        - Test code with annotations
+        - Test execution results and coverage
+        """
+        is_python = language == "python"
+        display_name = qualified_name or function_name
+
+        if format == "html":
+            return LLMService._build_export_html(
+                is_python=is_python,
+                display_name=display_name,
+                function_name=function_name,
+                function_signature=function_signature,
+                qualified_name=qualified_name,
+                class_name=class_name,
+                source_file=source_file,
+                source_code=source_code,
+                function_intent=function_intent,
+                test_code=test_code,
+                design_doc=design_doc,
+                test_result=test_result,
+                coverage=coverage,
+            )
+        if format == "docx":
+            return LLMService._build_export_docx(
+                is_python=is_python,
+                display_name=display_name,
+                function_name=function_name,
+                function_signature=function_signature,
+                qualified_name=qualified_name,
+                class_name=class_name,
+                source_file=source_file,
+                source_code=source_code,
+                function_intent=function_intent,
+                test_code=test_code,
+                design_doc=design_doc,
+                test_result=test_result,
+                coverage=coverage,
+            )
+        return LLMService._build_export_markdown(
+            is_python=is_python,
+            display_name=display_name,
+            function_name=function_name,
+            function_signature=function_signature,
+            qualified_name=qualified_name,
+            class_name=class_name,
+            source_file=source_file,
+            source_code=source_code,
+            function_intent=function_intent,
+            test_code=test_code,
+            design_doc=design_doc,
+            test_result=test_result,
+            coverage=coverage,
+        )
+
+    @staticmethod
+    def _build_export_markdown(
+        is_python: bool,
+        display_name: str,
+        function_name: str,
+        function_signature: str,
+        qualified_name: Optional[str],
+        class_name: Optional[str],
+        source_file: str,
+        source_code: str,
+        function_intent: str,
+        test_code: str,
+        design_doc: Optional[dict],
+        test_result: Optional[dict],
+        coverage: Optional[dict],
+    ) -> str:
+        lang_label = "Python" if is_python else "C"
+        lang_tag = "python" if is_python else "c"
+        fw_label = "pytest" if is_python else "Unity"
+
+        lines = []
+        lines.append(f"# 单元测试用例文档")
+        lines.append(f"")
+        lines.append(f"## 1. 基本信息")
+        lines.append(f"")
+        lines.append(f"| 字段 | 内容 |")
+        lines.append(f"|------|------|")
+        lines.append(f"| 被测函数 | `{display_name}` |")
+        if class_name:
+            lines.append(f"| 所属类 | `{class_name}` |")
+        lines.append(f"| 语言 | {lang_label} |")
+        lines.append(f"| 测试框架 | {fw_label} |")
+        lines.append(f"| 源文件 | `{source_file}` |")
+        lines.append(f"")
+        lines.append(f"### 函数签名")
+        lines.append(f"")
+        lines.append(f"```{lang_tag}")
+        lines.append(function_signature)
+        lines.append(f"```")
+        lines.append(f"")
+
+        # Source code
+        if source_code:
+            lines.append(f"### 源代码")
+            lines.append(f"")
+            lines.append(f"```{lang_tag}")
+            lines.append(source_code)
+            lines.append(f"```")
+            lines.append(f"")
+
+        # Design document
+        if design_doc:
+            lines.append(f"## 2. 设计文档")
+            lines.append(f"")
+            basic = design_doc.get("basic_info", {})
+            if basic:
+                lines.append(f"- **函数名称**: {basic.get('function_name', function_name)}")
+                lines.append(f"- **软件单元标识**: {basic.get('software_unit_identifier', '-')}")
+                desc = basic.get('function_desc', '')
+                if desc:
+                    lines.append(f"- **功能描述**: {desc}")
+                lines.append(f"")
+            io_info = design_doc.get("io_params", {})
+            inputs = io_info.get("input_params", [])
+            if inputs:
+                lines.append(f"### 输入参数")
+                lines.append(f"")
+                for p in inputs:
+                    lines.append(f"- **{p.get('param_name', '?')}**: {p.get('param_desc', '-')}")
+                lines.append(f"")
+            ret_vals = io_info.get("return_value", [])
+            if ret_vals:
+                lines.append(f"### 返回值")
+                lines.append(f"")
+                for r in ret_vals:
+                    lines.append(f"- **{r.get('value', '?')}**: {r.get('desc', '-')}")
+                lines.append(f"")
+            algo = design_doc.get("algorithm", {})
+            if algo.get("desc"):
+                lines.append(f"### 算法描述")
+                lines.append(f"")
+                lines.append(algo["desc"])
+                lines.append(f"")
+            flow = design_doc.get("logic_flow", {})
+            steps = flow.get("flow_steps", [])
+            if steps:
+                lines.append(f"### 逻辑流程")
+                lines.append(f"")
+                for i, step in enumerate(steps, 1):
+                    lines.append(f"{i}. {step}")
+                lines.append(f"")
+            call_rel = design_doc.get("call_relation", {})
+            called = call_rel.get("called_functions", [])
+            if called:
+                lines.append(f"### 调用关系")
+                lines.append(f"")
+                lines.append(f"被调用函数: {', '.join('`' + c + '`' for c in called)}")
+                lines.append(f"")
+
+        # Function intent (semantic meaning)
+        lines.append(f"## {3 if design_doc else 2}. 函数意图（语义分析）")
+        lines.append(f"")
+        if function_intent:
+            lines.append(function_intent)
+        else:
+            lines.append("*(未提供函数意图)*")
+        lines.append(f"")
+
+        # Test code
+        section_num = 4 if design_doc else 3
+        lines.append(f"## {section_num}. 测试用例")
+        lines.append(f"")
+        lines.append(f"```{lang_tag}")
+        lines.append(test_code)
+        lines.append(f"```")
+        lines.append(f"")
+
+        # Test results
+        section_num += 1
+        lines.append(f"## {section_num}. 测试执行结果")
+        lines.append(f"")
+        if test_result:
+            passed = test_result.get("passed", 0)
+            failed = test_result.get("failed", 0)
+            total = test_result.get("total", 0)
+            lines.append(f"| 指标 | 数值 |")
+            lines.append(f"|------|------|")
+            lines.append(f"| 通过 | {passed} |")
+            lines.append(f"| 失败 | {failed} |")
+            lines.append(f"| 总计 | {total} |")
+            if total > 0:
+                rate = round(passed / total * 100, 1)
+                lines.append(f"| 通过率 | {rate}% |")
+            lines.append(f"")
+        else:
+            lines.append("*(尚未执行测试)*")
+            lines.append(f"")
+
+        # Coverage
+        if coverage:
+            section_num += 1
+            lines.append(f"## {section_num}. 覆盖率分析")
+            lines.append(f"")
+            for fcov in coverage.get("files", []):
+                lines.append(f"### {fcov.get('file', 'unknown')}")
+                lines.append(f"")
+                lines.append(f"| 覆盖类型 | 覆盖行/分支 | 总行/分支 | 覆盖率 |")
+                lines.append(f"|----------|-------------|-----------|--------|")
+                for key, label in [("line", "行覆盖率"), ("function", "函数覆盖率"), ("branch", "分支覆盖率")]:
+                    detail = fcov.get(key)
+                    if detail:
+                        cov_val = detail.get("covered", 0)
+                        tot_val = detail.get("total", 0)
+                        r = round(detail.get("rate", 0) * 100, 1)
+                        lines.append(f"| {label} | {cov_val} | {tot_val} | {r}% |")
+                lines.append(f"")
+        else:
+            lines.append("")
+
+        lines.append("---")
+        lines.append(f"")
+        lines.append(f"*文档由单元测试用例智能生成工具自动生成*")
+        lines.append(f"")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_export_html(
+        is_python: bool,
+        display_name: str,
+        function_name: str,
+        function_signature: str,
+        qualified_name: Optional[str],
+        class_name: Optional[str],
+        source_file: str,
+        source_code: str,
+        function_intent: str,
+        test_code: str,
+        design_doc: Optional[dict],
+        test_result: Optional[dict],
+        coverage: Optional[dict],
+    ) -> str:
+        """Build an HTML export document (self-contained, minimal styling)."""
+        import html as _html
+        esc = _html.escape
+        lang_label = "Python" if is_python else "C"
+        lang_tag = "python" if is_python else "c"
+        fw_label = "pytest" if is_python else "Unity"
+
+        parts = []
+        parts.append("""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>单元测试用例文档</title>
+<style>
+body { font-family: -apple-system, 'Segoe UI', system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 2em; color: #1e293b; line-height: 1.7; }
+h1 { border-bottom: 3px solid #2563eb; padding-bottom: .5em; }
+h2 { border-bottom: 2px solid #e2e8f0; padding-bottom: .3em; margin-top: 2em; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #e2e8f0; padding: .5em .75em; text-align: left; }
+th { background: #f8fafc; }
+pre { background: #1e293b; color: #e2e8f0; padding: 1em; border-radius: 8px; overflow-x: auto; }
+code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: .9em; }
+.pass { color: #16a34a; font-weight: 700; }
+.fail { color: #dc2626; font-weight: 700; }
+.footer { color: #94a3b8; font-size: .85em; margin-top: 3em; }
+</style>
+</head>
+<body>
+""")
+        parts.append(f"<h1>单元测试用例文档</h1>")
+
+        # Section 1: Basic info
+        parts.append(f"<h2>1. 基本信息</h2>")
+        parts.append(f"<table>")
+        parts.append(f"<tr><th>被测函数</th><td><code>{esc(display_name)}</code></td></tr>")
+        if class_name:
+            parts.append(f"<tr><th>所属类</th><td><code>{esc(class_name)}</code></td></tr>")
+        parts.append(f"<tr><th>语言</th><td>{lang_label}</td></tr>")
+        parts.append(f"<tr><th>测试框架</th><td>{fw_label}</td></tr>")
+        parts.append(f"<tr><th>源文件</th><td><code>{esc(source_file)}</code></td></tr>")
+        parts.append(f"</table>")
+
+        parts.append(f"<h3>函数签名</h3>")
+        parts.append(f"<pre><code>{esc(function_signature)}</code></pre>")
+
+        if source_code:
+            parts.append(f"<h3>源代码</h3>")
+            parts.append(f"<pre><code>{esc(source_code)}</code></pre>")
+
+        # Section 2: Design doc
+        sec = 2
+        if design_doc:
+            parts.append(f"<h2>{sec}. 设计文档</h2>")
+            sec += 1
+            basic = design_doc.get("basic_info", {})
+            if basic:
+                parts.append(f"<p><strong>函数名称:</strong> {esc(basic.get('function_name', function_name))}</p>")
+                parts.append(f"<p><strong>软件单元标识:</strong> {esc(basic.get('software_unit_identifier', '-'))}</p>")
+                desc = basic.get('function_desc', '')
+                if desc:
+                    parts.append(f"<p><strong>功能描述:</strong> {esc(desc)}</p>")
+            io_info = design_doc.get("io_params", {})
+            inputs = io_info.get("input_params", [])
+            if inputs:
+                parts.append(f"<h3>输入参数</h3><ul>")
+                for p in inputs:
+                    parts.append(f"<li><strong>{esc(p.get('param_name', '?'))}:</strong> {esc(p.get('param_desc', '-'))}</li>")
+                parts.append(f"</ul>")
+            ret_vals = io_info.get("return_value", [])
+            if ret_vals:
+                parts.append(f"<h3>返回值</h3><ul>")
+                for r in ret_vals:
+                    parts.append(f"<li><strong>{esc(r.get('value', '?'))}:</strong> {esc(r.get('desc', '-'))}</li>")
+                parts.append(f"</ul>")
+
+        # Function intent
+        parts.append(f"<h2>{sec}. 函数意图（语义分析）</h2>")
+        sec += 1
+        if function_intent:
+            parts.append(f"<pre>{esc(function_intent)}</pre>")
+        else:
+            parts.append("<p><em>(未提供函数意图)</em></p>")
+
+        # Test code
+        parts.append(f"<h2>{sec}. 测试用例</h2>")
+        sec += 1
+        parts.append(f"<pre><code>{esc(test_code)}</code></pre>")
+
+        # Test results
+        parts.append(f"<h2>{sec}. 测试执行结果</h2>")
+        sec += 1
+        if test_result:
+            passed = test_result.get("passed", 0)
+            failed = test_result.get("failed", 0)
+            total = test_result.get("total", 0)
+            parts.append(f"<table>")
+            parts.append(f"<tr><th>通过</th><td class='pass'>{passed}</td></tr>")
+            parts.append(f"<tr><th>失败</th><td class='fail'>{failed}</td></tr>")
+            parts.append(f"<tr><th>总计</th><td>{total}</td></tr>")
+            if total > 0:
+                rate = round(passed / total * 100, 1)
+                parts.append(f"<tr><th>通过率</th><td>{rate}%</td></tr>")
+            parts.append(f"</table>")
+        else:
+            parts.append("<p><em>(尚未执行测试)</em></p>")
+
+        # Coverage
+        if coverage:
+            parts.append(f"<h2>{sec}. 覆盖率分析</h2>")
+            for fcov in coverage.get("files", []):
+                parts.append(f"<h3>{esc(fcov.get('file', 'unknown'))}</h3>")
+                parts.append(f"<table>")
+                parts.append(f"<tr><th>覆盖类型</th><th>覆盖行/分支</th><th>总行/分支</th><th>覆盖率</th></tr>")
+                for key, label in [("line", "行覆盖率"), ("function", "函数覆盖率"), ("branch", "分支覆盖率")]:
+                    detail = fcov.get(key)
+                    if detail:
+                        cov_val = detail.get("covered", 0)
+                        tot_val = detail.get("total", 0)
+                        r = round(detail.get("rate", 0) * 100, 1)
+                        parts.append(f"<tr><td>{label}</td><td>{cov_val}</td><td>{tot_val}</td><td>{r}%</td></tr>")
+                parts.append(f"</table>")
+
+        parts.append("<hr><p class='footer'>文档由单元测试用例智能生成工具自动生成</p>")
+        parts.append("</body></html>")
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def _set_run_font(run, western: str = "Consolas", east_asian: str = "Microsoft YaHei", size: int = 11):
+        """Set both Western and East Asian fonts on a run for proper CJK rendering."""
+        from docx.shared import Pt as _Pt
+        from lxml import etree
+        rPr = run._r.get_or_add_rPr()
+        ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+        rFonts = rPr.find(f'{ns}rFonts')
+        if rFonts is None:
+            rFonts = etree.SubElement(rPr, f'{ns}rFonts')
+        rFonts.set(f'{ns}ascii', western)
+        rFonts.set(f'{ns}hAnsi', western)
+        rFonts.set(f'{ns}eastAsia', east_asian)
+        run.font.size = _Pt(size)
+
+    @staticmethod
+    def _set_style_font(style, western: str = "Consolas", east_asian: str = "Microsoft YaHei", size: int = 11):
+        """Set both Western and East Asian fonts on a paragraph style for proper CJK rendering."""
+        from docx.shared import Pt as _Pt
+        from lxml import etree
+        style.font.name = western
+        style.font.size = _Pt(size)
+        rPr = style.element.get_or_add_rPr()
+        ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+        rFonts = rPr.find(f'{ns}rFonts')
+        if rFonts is None:
+            rFonts = etree.SubElement(rPr, f'{ns}rFonts')
+        rFonts.set(f'{ns}ascii', western)
+        rFonts.set(f'{ns}hAnsi', western)
+        rFonts.set(f'{ns}eastAsia', east_asian)
+
+    @staticmethod
+    def _add_paragraph_with_font(doc, text: str, western: str = "Consolas", east_asian: str = "Microsoft YaHei", size: int = 11, style: str = None):
+        """Add a paragraph with proper CJK font support."""
+        p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+        run = p.add_run(text)
+        LLMService._set_run_font(run, western=western, east_asian=east_asian, size=size)
+        return p
+
+    @staticmethod
+    def _build_export_docx(
+        is_python: bool,
+        display_name: str,
+        function_name: str,
+        function_signature: str,
+        qualified_name: Optional[str],
+        class_name: Optional[str],
+        source_file: str,
+        source_code: str,
+        function_intent: str,
+        test_code: str,
+        design_doc: Optional[dict],
+        test_result: Optional[dict],
+        coverage: Optional[dict],
+    ) -> str:
+        """Build a DOCX test document, returned as base64-encoded bytes."""
+        import io
+        import base64 as _b64
+
+        try:
+            from docx import Document
+            from docx.shared import Inches, Pt, Cm, RGBColor
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            from docx.enum.table import WD_TABLE_ALIGNMENT
+        except ImportError:
+            return ""  # python-docx not installed
+
+        doc = Document()
+
+        # Set default style with CJK font support
+        style = doc.styles['Normal']
+        LLMService._set_style_font(style, western="Consolas", east_asian="Microsoft YaHei", size=11)
+
+        lang_label = "Python" if is_python else "C"
+        fw_label = "pytest" if is_python else "Unity"
+
+        # Title
+        title = doc.add_heading('单元测试用例文档', level=0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in title.runs:
+            LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=22)
+
+        # Section 1: Basic Info
+        h1 = doc.add_heading('1. 基本信息', level=1)
+        for run in h1.runs:
+            LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=16)
+
+        table = doc.add_table(rows=5 + (1 if class_name else 0), cols=2, style='Light Grid Accent 1')
+        table.alignment = WD_TABLE_ALIGNMENT.LEFT
+        row = 0
+        for label, val in [
+            ("被测函数", display_name),
+            ("所属类", class_name),
+            ("语言", lang_label),
+            ("测试框架", fw_label),
+            ("源文件", source_file),
+        ]:
+            if val is None:
+                continue
+            table.rows[row].cells[0].text = label
+            table.rows[row].cells[1].text = str(val)
+            for cell in table.rows[row].cells:
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        LLMService._set_run_font(r, western="Consolas", east_asian="Microsoft YaHei", size=10)
+            row += 1
+        doc.add_paragraph()
+
+        doc.add_heading('函数签名', level=2)
+        LLMService._add_paragraph_with_font(doc, function_signature, western="Consolas", east_asian="Microsoft YaHei", size=10, style='No Spacing')
+
+        if source_code:
+            doc.add_heading('源代码', level=2)
+            LLMService._add_paragraph_with_font(doc, source_code, western="Consolas", east_asian="Microsoft YaHei", size=10, style='No Spacing')
+
+        sec = 2
+
+        # Design doc
+        if design_doc:
+            doc.add_heading(f'{sec}. 设计文档', level=1)
+            sec += 1
+            basic = design_doc.get("basic_info", {})
+            if basic:
+                LLMService._add_paragraph_with_font(doc, f"函数名称: {basic.get('function_name', function_name)}", size=10)
+                LLMService._add_paragraph_with_font(doc, f"软件单元标识: {basic.get('software_unit_identifier', '-')}", size=10)
+                desc = basic.get('function_desc', '')
+                if desc:
+                    LLMService._add_paragraph_with_font(doc, f"功能描述: {desc}", size=10)
+            io_info = design_doc.get("io_params", {})
+            inputs = io_info.get("input_params", [])
+            if inputs:
+                doc.add_heading('输入参数', level=2)
+                for p in inputs:
+                    LLMService._add_paragraph_with_font(doc, f"{p.get('param_name', '?')}: {p.get('param_desc', '-')}", size=10)
+            ret_vals = io_info.get("return_value", [])
+            if ret_vals:
+                doc.add_heading('返回值', level=2)
+                for r in ret_vals:
+                    LLMService._add_paragraph_with_font(doc, f"{r.get('value', '?')}: {r.get('desc', '-')}", size=10)
+
+        # Function intent
+        h_intent = doc.add_heading(f'{sec}. 函数意图（语义分析）', level=1)
+        for run in h_intent.runs:
+            LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=16)
+        sec += 1
+        if function_intent:
+            LLMService._add_paragraph_with_font(doc, function_intent, size=10)
+        else:
+            p = doc.add_paragraph()
+            run = p.add_run('(未提供函数意图)')
+            run.italic = True
+            LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=10)
+
+        # Test code
+        doc.add_heading(f'{sec}. 测试用例', level=1)
+        sec += 1
+        p = doc.add_paragraph()
+        run = p.add_run(test_code)
+        LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=9)
+
+        # Test results
+        doc.add_heading(f'{sec}. 测试执行结果', level=1)
+        sec += 1
+        if test_result:
+            passed = test_result.get("passed", 0)
+            failed = test_result.get("failed", 0)
+            total = test_result.get("total", 0)
+            res_table = doc.add_table(rows=4, cols=2, style='Light Grid Accent 1')
+            for i, (label, val) in enumerate([
+                ("通过", str(passed)),
+                ("失败", str(failed)),
+                ("总计", str(total)),
+                ("通过率", f"{round(passed / total * 100, 1)}%" if total > 0 else "N/A"),
+            ]):
+                res_table.rows[i].cells[0].text = label
+                res_table.rows[i].cells[1].text = val
+                for cell in res_table.rows[i].cells:
+                    for p2 in cell.paragraphs:
+                        for r2 in p2.runs:
+                            LLMService._set_run_font(r2, western="Consolas", east_asian="Microsoft YaHei", size=10)
+        else:
+            p = doc.add_paragraph()
+            run = p.add_run('(尚未执行测试)')
+            run.italic = True
+            LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=10)
+        doc.add_paragraph()
+
+        # Coverage
+        if coverage:
+            doc.add_heading(f'{sec}. 覆盖率分析', level=1)
+            for fcov in coverage.get("files", []):
+                doc.add_heading(fcov.get('file', 'unknown'), level=2)
+                cov_table = doc.add_table(rows=4, cols=4, style='Light Grid Accent 1')
+                cov_table.rows[0].cells[0].text = "覆盖类型"
+                cov_table.rows[0].cells[1].text = "覆盖行/分支"
+                cov_table.rows[0].cells[2].text = "总行/分支"
+                cov_table.rows[0].cells[3].text = "覆盖率"
+                for i, (key, label) in enumerate([("line", "行覆盖率"), ("function", "函数覆盖率"), ("branch", "分支覆盖率")], 1):
+                    detail = fcov.get(key)
+                    if detail:
+                        cov_table.rows[i].cells[0].text = label
+                        cov_table.rows[i].cells[1].text = str(detail.get("covered", 0))
+                        cov_table.rows[i].cells[2].text = str(detail.get("total", 0))
+                        cov_table.rows[i].cells[3].text = f"{round(detail.get('rate', 0) * 100, 1)}%"
+                for row_obj in cov_table.rows:
+                    for cell in row_obj.cells:
+                        for p2 in cell.paragraphs:
+                            for r2 in p2.runs:
+                                LLMService._set_run_font(r2, western="Consolas", east_asian="Microsoft YaHei", size=10)
+
+        doc.add_paragraph()
+        p_footer = doc.add_paragraph()
+        run_footer = p_footer.add_run('文档由单元测试用例智能生成工具自动生成')
+        run_footer.italic = True
+        LLMService._set_run_font(run_footer, western="Consolas", east_asian="Microsoft YaHei", size=9)
+
+        # Save to bytes and base64 encode
+        buf = io.BytesIO()
+        doc.save(buf)
+        return _b64.b64encode(buf.getvalue()).decode('ascii')

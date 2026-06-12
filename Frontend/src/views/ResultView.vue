@@ -39,19 +39,38 @@
         </div>
 
         <div class="flex items-center gap-3" v-if="progress === 100">
-          <button 
+          <button
+            @click="exportDocument('docx')"
+            :disabled="exporting"
+            class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 text-white text-xs font-bold uppercase rounded flex items-center gap-2 transition-all shadow-sm"
+          >
+            <Download class="w-3.5 h-3.5" :class="{ 'animate-pulse': exporting }" />
+            {{ exporting ? '导出中...' : '导出 DOCX' }}
+          </button>
+
+          <button
+            @click="exportDocument('markdown')"
+            :disabled="exporting"
+            class="px-4 py-2 bg-slate-100 hover:bg-slate-200 disabled:bg-slate-50 disabled:text-slate-300 text-slate-700 text-xs font-bold uppercase rounded flex items-center gap-2 transition-colors"
+            title="导出 Markdown"
+          >
+            <Download class="w-3.5 h-3.5" />
+            MD
+          </button>
+
+          <button
             v-if="canFix"
             @click="fixTestCase"
-            :disabled="fixing"
+            :disabled="fixing || exporting"
             class="px-4 py-2 bg-primary-600 hover:bg-primary-700 disabled:bg-slate-200 text-white text-xs font-bold uppercase rounded flex items-center gap-2 transition-all shadow-sm"
           >
             <Zap class="w-3.5 h-3.5" :class="{ 'animate-pulse': fixing }" />
             {{ fixing ? '正在修复...' : '修复测试用例' }}
           </button>
-          
-          <button 
+
+          <button
             @click="startExecution"
-            :disabled="executing || fixing"
+            :disabled="executing || fixing || exporting"
             class="px-4 py-2 bg-slate-100 hover:bg-slate-200 disabled:bg-slate-50 disabled:text-slate-300 text-slate-700 text-xs font-bold uppercase rounded flex items-center gap-2 transition-colors"
           >
             <RotateCw class="w-3.5 h-3.5" :class="{ 'animate-spin': executing && progress === 100 }" />
@@ -150,7 +169,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../store'
 import axios from 'axios'
-import { Terminal, ShieldCheck, RotateCw, Zap, FileText } from 'lucide-vue-next'
+import { Terminal, ShieldCheck, RotateCw, Zap, FileText, Download } from 'lucide-vue-next'
 
 const store = useAppStore()
 const router = useRouter()
@@ -158,6 +177,7 @@ const router = useRouter()
 const progress = ref(0)
 const executing = ref(false)
 const fixing = ref(false)
+const exporting = ref(false)
 const result = ref(null)
 const errorMessage = ref(null)
 
@@ -197,16 +217,22 @@ const getLineCoverageClass = (lineNumber) => {
 
 const statusTitle = computed(() => {
   if (errorMessage.value) return '执行出错'
-  if (executing.value) return progress.value < 50 ? '正在编译测试用例' : '正在执行测试并收集数据'
+  const language = result.value?.language || store.projectLanguage || 'c'
+  if (executing.value) {
+    return progress.value < 50
+      ? (language === 'python' ? '正在准备 pytest 测试环境' : '正在编译测试用例')
+      : (language === 'python' ? '正在执行 pytest 并收集 coverage' : '正在执行测试并收集数据')
+  }
   if (result.value?.compile_success === false) return '编译失败'
   if (result.value?.test_result) return '执行完成'
   return '准备就绪'
 })
 
 const statusDescription = computed(() => {
+  const language = result.value?.language || store.projectLanguage || 'c'
   if (errorMessage.value) return errorMessage.value
-  if (executing.value) return '正在使用 Unity 框架构建二进制并执行符号分析'
-  if (result.value?.compile_success === false) return '生成的代码可能存在语法错误或缺少头文件依赖'
+  if (executing.value) return language === 'python' ? '正在创建虚拟环境、执行 pytest 并采集 coverage' : '正在使用 Unity 框架构建二进制并执行符号分析'
+  if (result.value?.compile_success === false) return language === 'python' ? '测试环境创建失败、依赖安装失败，或生成的 pytest 用例不可执行' : '生成的代码可能存在语法错误或缺少头文件依赖'
   if (result.value?.test_result) return `成功通过 ${result.value.test_result.passed} 个用例，共计 ${result.value.test_result.total} 个`
   return '点击开始按钮执行生成的测试用例'
 })
@@ -263,7 +289,7 @@ const startExecution = async () => {
 
 const fixTestCase = async () => {
   if (!canFix.value || fixing.value || executing.value) return
-  
+
   // 1. Get failure info
   let failureInfo = ""
   if (result.value.compile_success === false) {
@@ -275,6 +301,56 @@ const fixTestCase = async () => {
   // 2. Store failure context and navigate back to generate page
   store.setFailureContext(failureInfo, store.taskId)
   router.push('/generate')
+}
+
+const exportDocument = async (format = 'markdown') => {
+  if (!store.taskId) {
+    alert('请先执行测试用例')
+    return
+  }
+  exporting.value = true
+  try {
+    const response = await axios.post('/api/testcase/export', {
+      task_id: store.taskId,
+      format: format
+    })
+    const { content, filename } = response.data
+
+    if (format === 'docx') {
+      // base64 decode for binary formats
+      const byteChars = atob(content)
+      const byteNums = new Array(byteChars.length)
+      for (let i = 0; i < byteChars.length; i++) {
+        byteNums[i] = byteChars.charCodeAt(i)
+      }
+      const byteArr = new Uint8Array(byteNums)
+      const blob = new Blob([byteArr], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } else {
+      const mimeType = format === 'html' ? 'text/html' : 'text/markdown'
+      const blob = new Blob([content], { type: `${mimeType};charset=utf-8` })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }
+  } catch (error) {
+    console.error('Export failed:', error)
+    alert('导出文档失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    exporting.value = false
+  }
 }
 
 onMounted(() => {

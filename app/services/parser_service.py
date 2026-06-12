@@ -1,3 +1,4 @@
+import ast
 import re
 import os
 import base64
@@ -8,19 +9,30 @@ from app.services.project_service import ProjectService
 
 class ParserService:
     @staticmethod
-    def parse_functions(content: str, file_id: str) -> List[FunctionInfo]:
-        """
-        Extracts function definitions using regex and brace counting.
-        """
+    def parse_functions(
+        content: str,
+        file_id: str,
+        *,
+        file_path: Optional[str] = None,
+        language: Optional[str] = None
+    ) -> List[FunctionInfo]:
+        if not language and file_path:
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext == ".py":
+                language = "python"
+            elif ext in {".c", ".h"}:
+                language = "c"
+        language = language or "c"
+        if language == "python":
+            return ParserService._parse_python_functions(content, file_id)
+        return ParserService._parse_c_functions(content, file_id)
+
+    @staticmethod
+    def _parse_c_functions(content: str, file_id: str) -> List[FunctionInfo]:
         lines = content.split('\n')
         functions = []
-        
-        # More robust regex for function start
-        # Matches: [type] [stars] [name] ( [args] )
-        # Updated to handle multi-word return types (e.g., unsigned int, struct Foo)
-        # It captures the LAST word before the parenthesis as the function name
         func_start_pattern = re.compile(r'^(?:static\s+|inline\s+|extern\s+)*(?:[a-zA-Z0-9_]+\s*\*?\s+)+([a-zA-Z0-9_]+)\s*\(([^)]*)\)')
-        
+
         i = 0
         while i < len(lines):
             line = lines[i].strip()
@@ -84,12 +96,65 @@ class ParserService:
                         name=func_name,
                         start_line=start_line,
                         end_line=end_line,
-                        signature=line.rstrip('{').strip()
+                        signature=line.rstrip('{').strip(),
+                        language="c",
+                        qualified_name=func_name,
                     ))
                     i = end_line
                     continue
             i += 1
-            
+        return functions
+
+    @staticmethod
+    def _parse_python_functions(content: str, file_id: str) -> List[FunctionInfo]:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return []
+
+        functions: List[FunctionInfo] = []
+
+        def build_signature(node: ast.AST, class_name: Optional[str]) -> str:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return ""
+            prefix = "async def " if isinstance(node, ast.AsyncFunctionDef) else "def "
+            arg_names = [arg.arg for arg in node.args.args]
+            if class_name and arg_names and arg_names[0] in {"self", "cls"}:
+                arg_names = arg_names[1:]
+            return f"{prefix}{node.name}({', '.join(arg_names)})"
+
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions.append(FunctionInfo(
+                    function_id=f"{file_id}_{node.lineno}",
+                    name=node.name,
+                    start_line=node.lineno,
+                    end_line=getattr(node, "end_lineno", node.lineno),
+                    signature=build_signature(node, None),
+                    language="python",
+                    qualified_name=node.name,
+                    class_name=None,
+                    is_method=False,
+                    is_async=isinstance(node, ast.AsyncFunctionDef),
+                    target_kind="function",
+                ))
+            elif isinstance(node, ast.ClassDef):
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        qualified_name = f"{node.name}.{child.name}"
+                        functions.append(FunctionInfo(
+                            function_id=f"{file_id}_{child.lineno}",
+                            name=child.name,
+                            start_line=child.lineno,
+                            end_line=getattr(child, "end_lineno", child.lineno),
+                            signature=build_signature(child, node.name),
+                            language="python",
+                            qualified_name=qualified_name,
+                            class_name=node.name,
+                            is_method=True,
+                            is_async=isinstance(child, ast.AsyncFunctionDef),
+                            target_kind="method",
+                        ))
         return functions
 
     @staticmethod
@@ -116,6 +181,10 @@ class ParserService:
         project_id: str,
         header_strategy: str = "basename"
     ) -> ExtractTestTargetsResponse:
+        language = ProjectService.get_project_language(project_id)
+        if language == "python":
+            return ParserService._extract_python_test_targets(project_id)
+
         files = ProjectService.list_files(project_id)
         c_files = [p for p in files if p.lower().endswith(".c")]
         h_files = [p for p in files if p.lower().endswith(".h")]
@@ -139,7 +208,7 @@ class ParserService:
             file_id = base64.urlsafe_b64encode(c_path.encode()).decode()
             try:
                 content = ProjectService.get_file_content(project_id, c_path)
-                functions = ParserService.parse_functions(content, file_id)
+                functions = ParserService.parse_functions(content, file_id, file_path=c_path, language="c")
             except Exception:
                 continue
 
@@ -168,7 +237,9 @@ class ParserService:
                         source_file=c_path,
                         category="internal_static",
                         header_file=header_path,
-                        declared_in_header=False
+                        declared_in_header=False,
+                        language="c",
+                        qualified_name=f.qualified_name,
                     ))
                     continue
 
@@ -185,7 +256,9 @@ class ParserService:
                         category="external_linkage",
                         header_file=None,
                         declared_in_header=False,
-                        reason="no_corresponding_header"
+                        reason="no_corresponding_header",
+                        language="c",
+                        qualified_name=f.qualified_name,
                     ))
                     continue
 
@@ -200,7 +273,9 @@ class ParserService:
                         source_file=c_path,
                         category="external_linkage",
                         header_file=header_path,
-                        declared_in_header=True
+                        declared_in_header=True,
+                        language="c",
+                        qualified_name=f.qualified_name,
                     ))
                 else:
                     # Header exists but function not declared in it —
@@ -215,7 +290,9 @@ class ParserService:
                         category="external_linkage",
                         header_file=header_path,
                         declared_in_header=False,
-                        reason="not_declared_in_header"
+                        reason="not_declared_in_header",
+                        language="c",
+                        qualified_name=f.qualified_name,
                     ))
 
         stats = TestTargetStats(
@@ -232,14 +309,101 @@ class ParserService:
         )
 
     @staticmethod
-    def generate_code_graph(function_code: str) -> Dict[str, Any]:
-        """
-        Generates a simplified code graph using regex.
-        """
-        # 1. Extract variables (naive: arguments + basic declarations)
+    def _extract_python_test_targets(project_id: str) -> ExtractTestTargetsResponse:
+        files = ProjectService.list_files(project_id)
+        py_files = [
+            p for p in files
+            if p.lower().endswith(".py")
+            and "/tests/" not in f"/{p.lower()}/"
+            and not p.lower().startswith("tests/")
+        ]
+
+        must_test: List[TestTargetFunctionInfo] = []
+        skipped: List[TestTargetFunctionInfo] = []
+
+        for py_path in py_files:
+            file_id = base64.urlsafe_b64encode(py_path.encode()).decode()
+            try:
+                content = ProjectService.get_file_content(project_id, py_path)
+                functions = ParserService.parse_functions(content, file_id, file_path=py_path, language="python")
+            except Exception:
+                continue
+
+            for f in functions:
+                if f.name.startswith("_") and not f.is_method:
+                    skipped.append(TestTargetFunctionInfo(
+                        function_id=f.function_id,
+                        name=f.name,
+                        start_line=f.start_line,
+                        end_line=f.end_line,
+                        signature=f.signature,
+                        source_file=py_path,
+                        category="private_function",
+                        reason="private_name",
+                        language="python",
+                        qualified_name=f.qualified_name,
+                        class_name=f.class_name,
+                        is_method=f.is_method,
+                        is_async=f.is_async,
+                        target_kind=f.target_kind,
+                    ))
+                    continue
+                if f.is_method and f.name.startswith("_"):
+                    skipped.append(TestTargetFunctionInfo(
+                        function_id=f.function_id,
+                        name=f.name,
+                        start_line=f.start_line,
+                        end_line=f.end_line,
+                        signature=f.signature,
+                        source_file=py_path,
+                        category="private_method",
+                        reason="private_name",
+                        language="python",
+                        qualified_name=f.qualified_name,
+                        class_name=f.class_name,
+                        is_method=f.is_method,
+                        is_async=f.is_async,
+                        target_kind=f.target_kind,
+                    ))
+                    continue
+                must_test.append(TestTargetFunctionInfo(
+                    function_id=f.function_id,
+                    name=f.name,
+                    start_line=f.start_line,
+                    end_line=f.end_line,
+                    signature=f.signature,
+                    source_file=py_path,
+                    category="public_method" if f.is_method else "public_function",
+                    language="python",
+                    qualified_name=f.qualified_name,
+                    class_name=f.class_name,
+                    is_method=f.is_method,
+                    is_async=f.is_async,
+                    target_kind=f.target_kind,
+                ))
+
+        stats = TestTargetStats(
+            must_test_count=len(must_test),
+            optional_static_count=0,
+            skipped_count=len(skipped)
+        )
+        return ExtractTestTargetsResponse(
+            project_id=project_id,
+            must_test=must_test,
+            optional_static=[],
+            skipped=skipped,
+            stats=stats
+        )
+
+    @staticmethod
+    def generate_code_graph(function_code: str, language: str = "c") -> Dict[str, Any]:
+        if language == "python":
+            return ParserService._generate_python_code_graph(function_code)
+        return ParserService._generate_c_code_graph(function_code)
+
+    @staticmethod
+    def _generate_c_code_graph(function_code: str) -> Dict[str, Any]:
         variables = set()
-        
-        # Extract args from first line
         first_line = function_code.split('\n')[0]
         args_match = re.search(r'\(([^)]*)\)', first_line)
         if args_match:
@@ -273,6 +437,65 @@ class ParserService:
             "calls": list(calls),
             "returns": returns,
             "branches": []
+        }
+
+    @staticmethod
+    def _generate_python_code_graph(function_code: str) -> Dict[str, Any]:
+        try:
+            tree = ast.parse(function_code)
+        except SyntaxError:
+            return {"variables": [], "calls": [], "returns": [], "branches": []}
+
+        variables = set()
+        calls = set()
+        returns = []
+        branches = []
+
+        class Visitor(ast.NodeVisitor):
+            def visit_Name(self, node: ast.Name):
+                if isinstance(node.ctx, ast.Store):
+                    variables.add(node.id)
+                self.generic_visit(node)
+
+            def visit_Call(self, node: ast.Call):
+                if isinstance(node.func, ast.Name):
+                    calls.add(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    calls.add(node.func.attr)
+                self.generic_visit(node)
+
+            def visit_Return(self, node: ast.Return):
+                if node.value is None:
+                    returns.append("None")
+                else:
+                    try:
+                        returns.append(ast.unparse(node.value))
+                    except Exception:
+                        returns.append("return")
+                self.generic_visit(node)
+
+            def visit_If(self, node: ast.If):
+                branches.append("if")
+                self.generic_visit(node)
+
+            def visit_For(self, node: ast.For):
+                branches.append("for")
+                self.generic_visit(node)
+
+            def visit_While(self, node: ast.While):
+                branches.append("while")
+                self.generic_visit(node)
+
+            def visit_Try(self, node: ast.Try):
+                branches.append("try")
+                self.generic_visit(node)
+
+        Visitor().visit(tree)
+        return {
+            "variables": sorted(variables),
+            "calls": sorted(calls),
+            "returns": returns,
+            "branches": branches,
         }
 
     @staticmethod

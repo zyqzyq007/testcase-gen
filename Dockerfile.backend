@@ -9,11 +9,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # 安装后端运行时依赖 (移除 Node.js/npm)
 # 新增 lcov (runner_service.py 需要)
-# 切换到阿里云镜像源以加速构建
-RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Workaround for Docker seccomp/GPG issue: use .list format with trusted=yes
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf 'deb [trusted=yes] http://mirrors.aliyun.com/debian bookworm main bookworm-updates\n' > /etc/apt/sources.list.d/debian.list \
+    && printf 'deb [trusted=yes] http://mirrors.aliyun.com/debian-security bookworm-security main\n' >> /etc/apt/sources.list.d/debian.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
     openjdk-17-jdk \
+    python3-venv \
+    python3-dev \
     build-essential \
     zlib1g-dev \
     libssl-dev \

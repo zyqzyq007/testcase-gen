@@ -3,11 +3,19 @@ from fastapi.responses import FileResponse
 from typing import List, Optional
 import base64
 import os
+import re
+from datetime import datetime, timezone, timedelta
+
+# Beijing timezone (UTC+8)
+_BEIJING_TZ = timezone(timedelta(hours=8))
+
+def _beijing_now() -> datetime:
+    return datetime.now(_BEIJING_TZ)
 
 from app.services.project_service import ProjectService
 from app.services.parser_service import ParserService
 from app.services.joern_service import JoernService
-from app.models.project import UploadResponse, ProjectStructure, FileStructure, FunctionInfo, ExtractTestTargetsResponse, TestTargetStats
+from app.models.project import UploadResponse, ProjectStructure, FileStructure, ExtractTestTargetsResponse, TestTargetStats
 
 router = APIRouter(prefix="/api/project", tags=["project"])
 
@@ -17,12 +25,16 @@ async def upload_project(
     project_name: Optional[str] = Form(None)
 ):
     project_id, name, count = await ProjectService.create_project(file, project_name)
+    meta = ProjectService.get_project_meta(project_id)
     return UploadResponse(
         project_id=project_id,
         project_name=name,
         file_count=count,
         status="uploaded",
-        source="local"
+        source="local",
+        language=meta.get("language"),
+        test_framework=meta.get("test_framework"),
+        dependency_manager=meta.get("dependency_manager"),
     )
 
 @router.get("/list", response_model=List[UploadResponse])
@@ -43,9 +55,17 @@ async def has_design_doc(project_id: str):
     """判断项目是否包含任意设计文档（供前端决定是否执行第二步注释生成）"""
     return {"has_design_doc": ProjectService.has_design_doc(project_id)}
 
+@router.get("/{project_id}/upstream-status")
+async def get_upstream_status(project_id: str):
+    """检测上游工具（文档审查、需求追溯）的输出数据是否可用"""
+    from app.services.upstream_service import UpstreamService
+    return UpstreamService.get_upstream_status(project_id)
+
 @router.get("/{project_id}/structure", response_model=ProjectStructure)
 async def get_project_structure(project_id: str):
     files = ProjectService.list_files(project_id)
+    project_language = ProjectService.get_project_language(project_id)
+    project_framework = ProjectService.get_project_framework(project_id)
     structure = []
     
     for path in files:
@@ -53,19 +73,22 @@ async def get_project_structure(project_id: str):
         file_id = base64.urlsafe_b64encode(path.encode()).decode()
         ext = os.path.splitext(path)[1].lstrip('.')  # "c", "h", "json", …
 
-        if ext == 'json':
+        file_language = "python" if ext == "py" else ("c" if ext in {"c", "h"} else None)
+
+        if ext in {'json', 'toml', 'txt'} or path in {'requirements.txt', 'pyproject.toml', 'pytest.ini', 'setup.py'}:
             # JSON design-doc files: no function parsing, just expose for viewing
             structure.append(FileStructure(
                 file_id=file_id,
                 path=path,
-                file_type='json',
+                file_type=ext or 'text',
+                language=file_language,
                 functions=[]
             ))
             continue
 
         try:
             content = ProjectService.get_file_content(project_id, path)
-            functions = ParserService.parse_functions(content, file_id)
+            functions = ParserService.parse_functions(content, file_id, file_path=path, language=file_language or project_language)
         except Exception:
             functions = []
             
@@ -73,11 +96,14 @@ async def get_project_structure(project_id: str):
             file_id=file_id,
             path=path,
             file_type=ext or 'c',
+            language=file_language or project_language,
             functions=functions
         ))
         
     return ProjectStructure(
         project_id=project_id,
+        language=project_language,
+        test_framework=project_framework,
         files=structure
     )
 
@@ -121,7 +147,8 @@ async def get_test_summary(project_id: str):
     
     for func in must_test:
         # 2. Query Cache for each function
-        cache_data = CacheService.get_function_data(project_id, func.source_file, func.name)
+        cache_key = func.qualified_name or func.name
+        cache_data = CacheService.get_function_data(project_id, func.source_file, cache_key)
         
         # Build summary item
         item = {
@@ -129,6 +156,8 @@ async def get_test_summary(project_id: str):
             "name": func.name,
             "signature": func.signature,
             "source_file": func.source_file,
+            "language": func.language or ProjectService.get_project_language(project_id),
+            "qualified_name": func.qualified_name,
             "task_id": cache_data.get("latest_task_id"),
             "last_run": cache_data.get("last_execution_time"),
             "compile_success": cache_data.get("compile_success"),
@@ -166,21 +195,36 @@ async def get_test_summary(project_id: str):
     }
 
 @router.get("/{project_id}/export")
-async def export_test_results(project_id: str):
+async def export_test_results(project_id: str, portal_project_id: str = Query(None)):
     """
     导出项目所有函数信息及测试结果为 JSON（含生成的测试代码）。
     供总览看板的「导出」按钮调用。
+    同时写入共享卷 {portal_project_id}/{project_id}/unit-test-generate.json
     """
     from app.services.cache_service import CacheService
-    from datetime import datetime
 
     summary = await get_test_summary(project_id)
 
-    # 在汇总结果基础上补充每个函数生成的测试代码与缓存更新时间
+    # 在汇总结果基础上补充每个函数生成的测试代码、缓存更新时间以及报错详情
+    from app.services.runner_service import RunnerService
     for item in summary["functions"]:
-        cache_data = CacheService.get_function_data(project_id, item["source_file"], item["name"])
+        cache_data = CacheService.get_function_data(project_id, item["source_file"], item.get("qualified_name") or item["name"])
         item["test_code"] = cache_data.get("test_code")
         item["updated_at"] = cache_data.get("updated_at")
+
+        # 从 task metadata 读取报错信息
+        task_id = item.get("task_id")
+        if task_id:
+            task_meta = RunnerService.get_task_metadata(task_id)
+            if task_meta:
+                if task_meta.get("error"):
+                    item["compile_error_msg"] = task_meta["error"].get("compile_error", "")
+                    item["error_stage"] = task_meta["error"].get("stage", "")
+                if task_meta.get("result"):
+                    item["test_stdout"] = task_meta["result"].get("stdout", "")
+            # 兜底：compile_success 为 False 但 metadata 里没有 error 记录（旧 task）
+            if item.get("compile_success") is False and not item.get("compile_error_msg"):
+                item["compile_error_msg"] = "编译失败（该任务执行于旧版本，详细错误信息未持久化，请重新执行测试以获取错误详情）"
 
     funcs = summary["functions"]
     stats = {
@@ -190,12 +234,157 @@ async def export_test_results(project_id: str):
         "compile_error": sum(1 for f in funcs if f["status"] == "compile_error"),
     }
 
-    return {
+    result = {
         "project_id": project_id,
-        "exported_at": datetime.now().isoformat(),
+        "project_name": ProjectService.get_project_name(project_id),
+        "exported_at": _beijing_now().isoformat(),
         "stats": stats,
         "functions": funcs,
     }
+
+    # 同步写入共享卷:
+    # {storage}/{portal_project_id}/{project_id}/{解压文件夹}/unit-test-generate/unit-test-generate.json
+    storage = os.getenv("UNIPORTAL_STORAGE_PATH")
+    if storage and os.path.isdir(storage) and portal_project_id:
+        import json as _json
+        item_dir = os.path.join(storage, portal_project_id, project_id)
+        # 找到 zip 解压出来的源码文件夹（排除隐藏目录和生成物）
+        src_dir = item_dir  # fallback
+        if os.path.isdir(item_dir):
+            subdirs = [d for d in os.listdir(item_dir)
+                       if os.path.isdir(os.path.join(item_dir, d))
+                       and not d.startswith(('.', '_'))
+                       and d not in {"unit-test-generate", "graphs", "__pycache__"}]
+            if len(subdirs) == 1:
+                src_dir = os.path.join(item_dir, subdirs[0])
+        out_dir = os.path.join(src_dir, "unit-test-generate")
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, "unit-test-generate.json")
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                _json.dump(result, f, ensure_ascii=False, indent=2)
+            print(f"[export] Saved: {out_path}", flush=True)
+        except Exception as e:
+            print(f"[export] Failed to write shared output: {e}", flush=True)
+
+    return result
+
+@router.get("/{project_id}/export-docx")
+async def export_test_results_docx(project_id: str):
+    """
+    导出项目所有函数信息及测试结果为 DOCX 文档（base64 编码）。
+    供总览看板的「导出 DOCX」按钮调用。
+    """
+    from app.services.cache_service import CacheService
+    from app.services.llm_service import LLMService
+    import io
+    import base64 as _b64
+
+    summary = await get_test_summary(project_id)
+    language = ProjectService.get_project_language(project_id)
+
+    try:
+        from docx import Document
+        from docx.shared import Pt, Cm
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.enum.table import WD_TABLE_ALIGNMENT
+    except ImportError:
+        raise HTTPException(status_code=500, detail="python-docx not installed")
+
+    doc = Document()
+
+    # Set default style with CJK font support
+    LLMService._set_style_font(doc.styles['Normal'], western="Consolas", east_asian="Microsoft YaHei", size=11)
+
+    # Title
+    title = doc.add_heading('项目测试报告', level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in title.runs:
+        LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=22)
+
+    LLMService._add_paragraph_with_font(doc, f"项目: {ProjectService.get_project_name(project_id)}", size=11)
+    LLMService._add_paragraph_with_font(doc, f"语言: {'Python' if language == 'python' else 'C'}", size=11)
+    LLMService._add_paragraph_with_font(doc, f"导出时间: {_beijing_now().strftime('%Y-%m-%d %H:%M:%S')}", size=11)
+    doc.add_paragraph()
+
+    funcs = summary.get("functions", [])
+
+    # Helper to set font on all cells in a table
+    def _set_table_font(table):
+        for row_obj in table.rows:
+            for cell in row_obj.cells:
+                for p in cell.paragraphs:
+                    for r in p.runs:
+                        LLMService._set_run_font(r, western="Consolas", east_asian="Microsoft YaHei", size=9)
+
+    # Stats table
+    doc.add_heading('总体统计', level=1)
+    passed = sum(1 for f in funcs if f["status"] == "passed")
+    failed = sum(1 for f in funcs if f["status"] in ("failed", "ignored"))
+    compile_err = sum(1 for f in funcs if f["status"] == "compile_error")
+    total = summary.get("total_functions", 1) or 1
+    stats_table = doc.add_table(rows=5, cols=2, style='Light Grid Accent 1')
+    stats_table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    for i, (label, val) in enumerate([
+        ("总被测函数", str(summary.get("total_functions", 0))),
+        ("通过", str(passed)),
+        ("失败", str(failed)),
+        ("编译错误", str(compile_err)),
+        ("通过率", f"{round(passed / total * 100, 1)}%"),
+    ]):
+        stats_table.rows[i].cells[0].text = label
+        stats_table.rows[i].cells[1].text = val
+    _set_table_font(stats_table)
+    doc.add_paragraph()
+
+    # Per-function details
+    doc.add_heading('函数测试详情', level=1)
+    for i, func in enumerate(funcs, 1):
+        doc.add_heading(f'{i}. {func["name"]}', level=2)
+
+        info_table = doc.add_table(rows=6, cols=2, style='Light Grid Accent 1')
+        status_map = {"passed": "通过", "failed": "失败", "ignored": "失败", "compile_error": "编译错误", "pending": "等待中", "no_tests": "无测试"}
+        for j, (label, val) in enumerate([
+            ("源文件", func.get("source_file", "")),
+            ("签名", func.get("signature", "")),
+            ("状态", status_map.get(func.get("status", ""), func.get("status", ""))),
+            ("行覆盖率", f"{round((func.get('line_coverage', 0) or 0) * 100, 1)}%"),
+            ("分支覆盖率", f"{round((func.get('branch_coverage', 0) or 0) * 100, 1)}%"),
+            ("通过/失败/总计", f"{func.get('passed', 0)}/{func.get('failed', 0)}/{func.get('total_tests', 0)}"),
+        ]):
+            info_table.rows[j].cells[0].text = label
+            info_table.rows[j].cells[1].text = val
+        _set_table_font(info_table)
+
+        # Test code
+        cache_data = CacheService.get_function_data(project_id, func["source_file"], func.get("qualified_name") or func["name"])
+        test_code = cache_data.get("test_code")
+        if test_code:
+            doc.add_heading('测试代码', level=3)
+            p = doc.add_paragraph()
+            run = p.add_run(test_code[:5000])
+            LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=8)
+
+        doc.add_paragraph()
+
+    doc.add_paragraph()
+    p_footer = doc.add_paragraph()
+    run_footer = p_footer.add_run('文档由单元测试用例智能生成工具自动生成')
+    run_footer.italic = True
+    LLMService._set_run_font(run_footer, western="Consolas", east_asian="Microsoft YaHei", size=9)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    content = _b64.b64encode(buf.getvalue()).decode('ascii')
+    safe_name = re.sub(r'[^\w\-.]', '_', ProjectService.get_project_name(project_id))
+    filename = f"test_report_{safe_name}_{_beijing_now().strftime('%Y%m%d_%H%M%S')}.docx"
+
+    return {
+        "content": content,
+        "format": "docx",
+        "filename": filename,
+    }
+
 
 @router.get("/{project_id}/file")
 async def get_file_source(project_id: str, file_id: str = Query(...)):
@@ -240,7 +429,7 @@ async def get_function_detail(project_id: str, function_id: str, use_joern: bool
         raise HTTPException(status_code=400, detail="Invalid function_id format")
         
     content = ProjectService.get_file_content(project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
+    functions = ParserService.parse_functions(content, file_id, file_path=path, language=ProjectService.get_project_language(project_id))
     
     target_func = None
     for f in functions:
@@ -257,22 +446,27 @@ async def get_function_detail(project_id: str, function_id: str, use_joern: bool
     func_lines = lines[target_func.start_line-1 : target_func.end_line]
     source_code = "\n".join(func_lines)
     
-    if use_joern:
+    language = ProjectService.get_project_language(project_id)
+    if use_joern and language == "c":
         code_graph = await ParserService.generate_joern_graph(project_id, target_func.name, depth=3, refresh=refresh)
         # Fallback to regex if Joern fails or returns empty
         if not code_graph or not code_graph.get("calls"):
-            print("Joern failed, using regex fallback")
-            code_graph = ParserService.generate_code_graph(source_code)
+            code_graph = ParserService.generate_code_graph(source_code, language=language)
     else:
-        code_graph = ParserService.generate_code_graph(source_code)
+        code_graph = ParserService.generate_code_graph(source_code, language=language)
     
     return {
         "function_id": function_id,
         "name": target_func.name,
+        "qualified_name": target_func.qualified_name,
         "signature": target_func.signature,
         "start_line": target_func.start_line,
         "end_line": target_func.end_line,
-        "source_code": source_code
+        "source_code": source_code,
+        "language": language,
+        "class_name": target_func.class_name,
+        "is_method": target_func.is_method,
+        "is_async": target_func.is_async,
     }
 
 @router.get("/{project_id}/function/{function_id}/graph")
@@ -288,7 +482,8 @@ async def get_function_graph(project_id: str, function_id: str, use_joern: bool 
         raise HTTPException(status_code=400, detail="Invalid function_id format")
         
     content = ProjectService.get_file_content(project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
+    language = ProjectService.get_project_language(project_id)
+    functions = ParserService.parse_functions(content, file_id, file_path=path, language=language)
     target_func = next((f for f in functions if f.start_line == start_line), None)
             
     if not target_func:
@@ -298,12 +493,12 @@ async def get_function_graph(project_id: str, function_id: str, use_joern: bool 
     func_lines = lines[target_func.start_line-1 : target_func.end_line]
     source_code = "\n".join(func_lines)
     
-    if use_joern:
+    if use_joern and language == "c":
         code_graph = await ParserService.generate_joern_graph(project_id, target_func.name, depth=3, refresh=refresh)
         if not code_graph or (not code_graph.get("calls") and not code_graph.get("graph_image")):
-            code_graph = ParserService.generate_code_graph(source_code)
+            code_graph = ParserService.generate_code_graph(source_code, language=language)
     else:
-        code_graph = ParserService.generate_code_graph(source_code)
+        code_graph = ParserService.generate_code_graph(source_code, language=language)
     
     return code_graph
 
@@ -320,8 +515,12 @@ async def get_specific_graph(project_id: str, function_id: str, graph_type: str,
     except:
         raise HTTPException(status_code=400, detail="Invalid function_id format")
 
+    language = ProjectService.get_project_language(project_id)
+    if language != "c":
+        raise HTTPException(status_code=400, detail="Graph images are currently supported only for C projects")
+
     content = ProjectService.get_file_content(project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
+    functions = ParserService.parse_functions(content, file_id, file_path=path, language=language)
     target_func = next((f for f in functions if f.start_line == start_line), None)
     if not target_func:
         raise HTTPException(status_code=404, detail="Function not found")

@@ -7,18 +7,42 @@ import re
 import os
 from typing import List, Optional
 from app.models.testcase import (
-    GenerateTestRequest, GenerateTestResponse, 
+    GenerateTestRequest, GenerateTestResponse,
     GenerateIntentRequest, GenerateIntentResponse,
     AnnotateTestRequest,
-    ExecuteTestRequest, ExecuteTestResponse
+    ExecuteTestRequest, ExecuteTestResponse,
+    ExportTestRequest, ExportTestResponse,
 )
 from app.services.project_service import ProjectService
 from app.services.parser_service import ParserService
 from app.services.llm_service import LLMService
 from app.services.runner_service import RunnerService, TASKS_DIR
 from app.services.cache_service import CacheService
+from app.services.upstream_service import UpstreamService
 
 router = APIRouter(prefix="/api/testcase", tags=["testcase"])
+
+
+def _get_cache_key(func) -> str:
+    return getattr(func, "qualified_name", None) or func.name
+
+
+def _resolve_target_function(project_id: str, function_id: str):
+    try:
+        parts = function_id.rsplit('_', 1)
+        file_id = parts[0]
+        start_line = int(parts[1])
+        path = base64.urlsafe_b64decode(file_id).decode()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid function_id")
+
+    language = ProjectService.get_project_language(project_id)
+    content = ProjectService.get_file_content(project_id, path)
+    functions = ParserService.parse_functions(content, file_id, file_path=path, language=language)
+    target_func = next((f for f in functions if f.start_line == start_line), None)
+    if not target_func:
+        raise HTTPException(status_code=404, detail="Function not found")
+    return path, content, target_func, language
 
 
 def _strip_weak_mocks(code: str) -> str:
@@ -166,34 +190,8 @@ def _strip_ignore_tests(code: str) -> str:
 
 @router.get("/history")
 async def get_testcase_history(project_id: str, function_id: str):
-    try:
-        parts = function_id.rsplit('_', 1)
-        file_id = parts[0]
-        start_line = int(parts[1])
-        path = base64.urlsafe_b64decode(file_id).decode()
-    except:
-        raise HTTPException(status_code=400, detail="Invalid function_id")
-    
-    # Need to parse function to get name for cache key
-    content = ProjectService.get_file_content(project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
-    
-    target_func = None
-    for f in functions:
-        if f.start_line == start_line:
-            target_func = f
-            break
-    
-    if not target_func:
-        # Fallback: try to find by fuzzy matching if start_line moved
-        # But for history retrieval, strict match or simple fail is maybe better?
-        # Actually, if we use CacheService, we rely on function_name.
-        # So we should try to find function by name if line match fails?
-        # For now, let's stick to strict match to be safe, or just return empty if not found.
-        # Wait, if we can't parse the function, we can't know its name, so we can't query cache.
-        raise HTTPException(status_code=404, detail="Function not found for history lookup")
-
-    data = CacheService.get_function_data(project_id, path, target_func.name)
+    path, _, target_func, _ = _resolve_target_function(project_id, function_id)
+    data = CacheService.get_function_data(project_id, path, _get_cache_key(target_func))
     
     # If we have a latest_task_id, we might want to fetch the code from there if not in cache
     test_code = data.get("test_code")
@@ -206,26 +204,7 @@ async def get_testcase_history(project_id: str, function_id: str):
 
 @router.post("/intent/stream")
 async def generate_intent_stream(request: GenerateIntentRequest):
-    try:
-        parts = request.function_id.rsplit('_', 1)
-        file_id = parts[0]
-        start_line = int(parts[1])
-        path = base64.urlsafe_b64decode(file_id).decode()
-    except:
-        raise HTTPException(status_code=400, detail="Invalid function_id")
-
-    content = ProjectService.get_file_content(request.project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
-    
-    target_func = None
-    for f in functions:
-        if f.start_line == start_line:
-            target_func = f
-            break
-            
-    if not target_func:
-        raise HTTPException(status_code=404, detail="Function not found")
-        
+    path, content, target_func, language = _resolve_target_function(request.project_id, request.function_id)
     lines = content.split('\n')
     func_lines = lines[target_func.start_line-1 : target_func.end_line]
     source_code = "\n".join(func_lines)
@@ -235,7 +214,7 @@ async def generate_intent_stream(request: GenerateIntentRequest):
     
     async def stream_generator():
         full_intent = ""
-        async for chunk in LLMService.generate_function_intent_stream(source_code, context_str):
+        async for chunk in LLMService.generate_function_intent_stream(source_code, context_str, language=language):
             full_intent += chunk
             yield chunk
         
@@ -243,7 +222,7 @@ async def generate_intent_stream(request: GenerateIntentRequest):
         CacheService.save_function_data(
             request.project_id, 
             path, 
-            target_func.name, 
+            _get_cache_key(target_func), 
             {"intent": full_intent}
         )
 
@@ -251,31 +230,11 @@ async def generate_intent_stream(request: GenerateIntentRequest):
 
 @router.post("/generate/stream")
 async def generate_testcase_stream(request: GenerateTestRequest):
-    # 1. Retrieve Function Info
-    try:
-        parts = request.function_id.rsplit('_', 1)
-        file_id = parts[0]
-        start_line = int(parts[1])
-        path = base64.urlsafe_b64decode(file_id).decode()
-    except:
-        raise HTTPException(status_code=400, detail="Invalid function_id")
-        
-    content = ProjectService.get_file_content(request.project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
-    
-    target_func = None
-    for f in functions:
-        if f.start_line == start_line:
-            target_func = f
-            break
-            
-    if not target_func:
-        raise HTTPException(status_code=404, detail="Function not found")
-        
+    path, content, target_func, language = _resolve_target_function(request.project_id, request.function_id)
     lines = content.split('\n')
     func_lines = lines[target_func.start_line-1 : target_func.end_line]
     source_code = "\n".join(func_lines)
-    code_graph = ParserService.generate_code_graph(source_code)
+    code_graph = ParserService.generate_code_graph(source_code, language=language)
     
     all_files = ProjectService.list_files(request.project_id)
     context_str = "Project Files:\n" + "\n".join(all_files)
@@ -286,9 +245,18 @@ async def generate_testcase_stream(request: GenerateTestRequest):
         print(f"Failed task id: {request.failed_task_id}")
         print(prior_test_code)
 
+    # 查询上游需求上下文（文档审查 + 需求追溯）
+    requirement_context = UpstreamService.get_requirement_context(
+        request.project_id,
+        target_func.name,
+        path,
+        signature=getattr(target_func, "signature", None),
+    )
+
     async def stream_generator():
         full_test_code = ""
         async for chunk in LLMService.generate_test_case_stream(
+            language=language,
             project_context=context_str,
             function_code=source_code,
             code_graph=code_graph,
@@ -297,6 +265,7 @@ async def generate_testcase_stream(request: GenerateTestRequest):
             failure_context=request.failure_context,
             function_intent=request.function_intent,
             prior_test_code=prior_test_code,
+            requirement_context=requirement_context,
         ):
             full_test_code += chunk
             # Send chunk as JSON to distinguish from task_id later
@@ -305,31 +274,30 @@ async def generate_testcase_stream(request: GenerateTestRequest):
         # After stream finishes, create task
         # Clean markdown code blocks using regex
         clean_code = full_test_code
-        # Remove ```c, ```cpp, ``` etc. and closing ```
         clean_code = re.sub(r'```\w*', '', clean_code)
         clean_code = clean_code.strip()
-        # Remove test functions that use TEST_IGNORE_MESSAGE
-        clean_code = _strip_ignore_tests(clean_code)
-        # Remove __attribute__((weak)) mock functions written by LLM
-        clean_code = _strip_weak_mocks(clean_code)
-        # Inject missing standard headers (e.g. <stdarg.h> for va_start)
-        clean_code = _fix_missing_headers(clean_code)
+        if language == "c":
+            clean_code = _strip_ignore_tests(clean_code)
+            clean_code = _strip_weak_mocks(clean_code)
+            clean_code = _fix_missing_headers(clean_code)
 
         task_id = RunnerService.create_task(
             project_id=request.project_id,
             function_id=request.function_id,
-            function_name=target_func.name,
+            function_name=_get_cache_key(target_func),
             test_code=clean_code,
             source_file_path=path,
             start_line=target_func.start_line,
-            end_line=target_func.end_line
+            end_line=target_func.end_line,
+            language=language,
+            test_framework=request.test_framework or ("pytest" if language == "python" else "unity"),
         )
         
         # Save task_id and test_code to cache
         CacheService.save_function_data(
             request.project_id,
             path,
-            target_func.name,
+            _get_cache_key(target_func),
             {
                 "latest_task_id": task_id,
                 "test_code": clean_code
@@ -342,26 +310,7 @@ async def generate_testcase_stream(request: GenerateTestRequest):
 
 @router.post("/intent", response_model=GenerateIntentResponse)
 async def generate_intent(request: GenerateIntentRequest):
-    try:
-        parts = request.function_id.rsplit('_', 1)
-        file_id = parts[0]
-        start_line = int(parts[1])
-        path = base64.urlsafe_b64decode(file_id).decode()
-    except:
-        raise HTTPException(status_code=400, detail="Invalid function_id")
-
-    content = ProjectService.get_file_content(request.project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
-    
-    target_func = None
-    for f in functions:
-        if f.start_line == start_line:
-            target_func = f
-            break
-            
-    if not target_func:
-        raise HTTPException(status_code=404, detail="Function not found")
-        
+    path, content, target_func, language = _resolve_target_function(request.project_id, request.function_id)
     lines = content.split('\n')
     func_lines = lines[target_func.start_line-1 : target_func.end_line]
     source_code = "\n".join(func_lines)
@@ -369,13 +318,13 @@ async def generate_intent(request: GenerateIntentRequest):
     all_files = ProjectService.list_files(request.project_id)
     context_str = "Project Files:\n" + "\n".join(all_files)
     
-    intent = await LLMService.generate_function_intent(source_code, context_str)
+    intent = await LLMService.generate_function_intent(source_code, context_str, language=language)
     
     # Save intent to cache
     CacheService.save_function_data(
         request.project_id, 
         path, 
-        target_func.name, 
+        _get_cache_key(target_func), 
         {"intent": intent}
     )
     
@@ -383,45 +332,35 @@ async def generate_intent(request: GenerateIntentRequest):
 
 @router.post("/generate", response_model=GenerateTestResponse)
 async def generate_testcase(request: GenerateTestRequest):
-    # 1. Retrieve Function Info
-    try:
-        parts = request.function_id.rsplit('_', 1)
-        file_id = parts[0]
-        start_line = int(parts[1])
-        path = base64.urlsafe_b64decode(file_id).decode()
-    except:
-        raise HTTPException(status_code=400, detail="Invalid function_id")
-        
-    content = ProjectService.get_file_content(request.project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
-    
-    target_func = None
-    for f in functions:
-        if f.start_line == start_line:
-            target_func = f
-            break
-            
-    if not target_func:
-        raise HTTPException(status_code=404, detail="Function not found")
-        
+    path, content, target_func, language = _resolve_target_function(request.project_id, request.function_id)
     lines = content.split('\n')
     func_lines = lines[target_func.start_line-1 : target_func.end_line]
     source_code = "\n".join(func_lines)
-    code_graph = ParserService.generate_code_graph(source_code)
+    code_graph = ParserService.generate_code_graph(source_code, language=language)
     
     # 2. Build Context
     # Include all header files in the project as context
     all_files = ProjectService.list_files(request.project_id)
     context_str = "Project Files:\n" + "\n".join(all_files)
 
+    # 查询上游需求上下文（文档审查 + 需求追溯）
+    requirement_context = UpstreamService.get_requirement_context(
+        request.project_id,
+        target_func.name,
+        path,
+        signature=getattr(target_func, "signature", None),
+    )
+
     # 3. Call LLM
     test_code = await LLMService.generate_test_case(
+        language=language,
         project_context=context_str,
         function_code=source_code,
         code_graph=code_graph,
         file_code=content,
         test_framework=request.test_framework,
         failure_context=request.failure_context,
+        requirement_context=requirement_context,
     )
     
     # 4. Create Task
@@ -429,28 +368,28 @@ async def generate_testcase(request: GenerateTestRequest):
     # Remove ```c, ```cpp, ``` etc. and closing ```
     test_code = re.sub(r'```\w*', '', test_code)
     test_code = test_code.strip()
-    # Remove test functions that use TEST_IGNORE_MESSAGE
-    test_code = _strip_ignore_tests(test_code)
-    # Remove __attribute__((weak)) mock functions written by LLM
-    test_code = _strip_weak_mocks(test_code)
-    # Inject missing standard headers (e.g. <stdarg.h> for va_start)
-    test_code = _fix_missing_headers(test_code)
+    if language == "c":
+        test_code = _strip_ignore_tests(test_code)
+        test_code = _strip_weak_mocks(test_code)
+        test_code = _fix_missing_headers(test_code)
 
     task_id = RunnerService.create_task(
         project_id=request.project_id,
         function_id=request.function_id,
-        function_name=target_func.name,
+        function_name=_get_cache_key(target_func),
         test_code=test_code,
         source_file_path=path,
         start_line=target_func.start_line,
-        end_line=target_func.end_line
+        end_line=target_func.end_line,
+        language=language,
+        test_framework=request.test_framework or ("pytest" if language == "python" else "unity"),
     )
     
     # Save task_id and test_code to cache
     CacheService.save_function_data(
         request.project_id,
         path,
-        target_func.name,
+        _get_cache_key(target_func),
         {
             "latest_task_id": task_id,
             "test_code": test_code
@@ -460,31 +399,26 @@ async def generate_testcase(request: GenerateTestRequest):
     return GenerateTestResponse(
         task_id=task_id,
         test_code=test_code,
-        status="generated"
+        status="generated",
+        language=language,
+        test_framework=request.test_framework or ("pytest" if language == "python" else "unity"),
     )
 
 @router.post("/annotate/stream")
 async def annotate_testcase_stream(request: AnnotateTestRequest):
     """
     第二步（流式）：基于设计文档，给已生成的测试代码在每条断言下插入中文注释。
+    支持 C (Unity) 和 Python (pytest) 两种语言。
     """
     # 1. 获取函数信息（用于查找设计文档）
-    try:
-        parts = request.function_id.rsplit('_', 1)
-        file_id = parts[0]
-        start_line = int(parts[1])
-        path = base64.urlsafe_b64decode(file_id).decode()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid function_id")
+    path, content, target_func, language = _resolve_target_function(request.project_id, request.function_id)
 
-    content = ProjectService.get_file_content(request.project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
-    target_func = next((f for f in functions if f.start_line == start_line), None)
-    if not target_func:
-        raise HTTPException(status_code=404, detail="Function not found")
-
-    # 2. 查找设计文档
-    design_doc = ProjectService.get_function_design_doc(request.project_id, target_func.name)
+    # 2. 查找设计文档（Python 也支持 qualified_name 匹配）
+    design_doc = ProjectService.get_function_design_doc(
+        request.project_id,
+        target_func.name,
+        qualified_name=getattr(target_func, "qualified_name", None)
+    )
     if not design_doc:
         raise HTTPException(status_code=404, detail="No design document found for this function")
 
@@ -497,9 +431,14 @@ async def annotate_testcase_stream(request: AnnotateTestRequest):
     func_lines = content.split('\n')[target_func.start_line - 1 : target_func.end_line]
     source_code = "\n".join(func_lines)
 
+    # Determine test file name based on language
+    test_file_name = "test_generated.py" if language == "python" else "test_runner.c"
+
     async def stream_generator():
         annotated_code = ""
-        async for chunk in LLMService.annotate_with_design_doc_stream(test_code, design_doc, source_code):
+        async for chunk in LLMService.annotate_with_design_doc_stream(
+            test_code, design_doc, source_code, language=language
+        ):
             annotated_code += chunk
             yield json.dumps({"type": "content", "content": chunk}) + "\n"
 
@@ -508,14 +447,14 @@ async def annotate_testcase_stream(request: AnnotateTestRequest):
 
         # 用带注释的代码覆盖 task 文件
         task_dir = os.path.join(TASKS_DIR, request.task_id)
-        code_path = os.path.join(task_dir, "test_runner.c")
+        code_path = os.path.join(task_dir, test_file_name)
         if os.path.exists(task_dir):
             with open(code_path, "w") as f:
                 f.write(clean_code)
 
         # 更新 cache
         CacheService.save_function_data(
-            request.project_id, path, target_func.name,
+            request.project_id, path, _get_cache_key(target_func),
             {"test_code": clean_code}
         )
 
@@ -528,22 +467,15 @@ async def annotate_testcase_stream(request: AnnotateTestRequest):
 async def annotate_testcase(request: AnnotateTestRequest):
     """
     第二步（非流式）：基于设计文档，给已生成的测试代码在每条断言下插入中文注释。
+    支持 C (Unity) 和 Python (pytest) 两种语言。
     """
-    try:
-        parts = request.function_id.rsplit('_', 1)
-        file_id = parts[0]
-        start_line = int(parts[1])
-        path = base64.urlsafe_b64decode(file_id).decode()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid function_id")
+    path, content, target_func, language = _resolve_target_function(request.project_id, request.function_id)
 
-    content = ProjectService.get_file_content(request.project_id, path)
-    functions = ParserService.parse_functions(content, file_id)
-    target_func = next((f for f in functions if f.start_line == start_line), None)
-    if not target_func:
-        raise HTTPException(status_code=404, detail="Function not found")
-
-    design_doc = ProjectService.get_function_design_doc(request.project_id, target_func.name)
+    design_doc = ProjectService.get_function_design_doc(
+        request.project_id,
+        target_func.name,
+        qualified_name=getattr(target_func, "qualified_name", None)
+    )
     if not design_doc:
         raise HTTPException(status_code=404, detail="No design document found for this function")
 
@@ -555,25 +487,32 @@ async def annotate_testcase(request: AnnotateTestRequest):
     func_lines = content.split('\n')[target_func.start_line - 1 : target_func.end_line]
     source_code = "\n".join(func_lines)
 
-    annotated_code = await LLMService.annotate_with_design_doc(test_code, design_doc, source_code)
+    annotated_code = await LLMService.annotate_with_design_doc(
+        test_code, design_doc, source_code, language=language
+    )
     clean_code = re.sub(r'```\w*', '', annotated_code).strip()
+
+    # Determine test file name based on language
+    test_file_name = "test_generated.py" if language == "python" else "test_runner.c"
 
     # 覆盖 task 文件
     task_dir = os.path.join(TASKS_DIR, request.task_id)
-    code_path = os.path.join(task_dir, "test_runner.c")
+    code_path = os.path.join(task_dir, test_file_name)
     if os.path.exists(task_dir):
         with open(code_path, "w") as f:
             f.write(clean_code)
 
     CacheService.save_function_data(
-        request.project_id, path, target_func.name,
+        request.project_id, path, _get_cache_key(target_func),
         {"test_code": clean_code}
     )
 
     return GenerateTestResponse(
         task_id=request.task_id,
         test_code=clean_code,
-        status="annotated"
+        status="annotated",
+        language=language,
+        test_framework="pytest" if language == "python" else "unity",
     )
 
 
@@ -599,3 +538,130 @@ async def get_test_result(task_id: str):
     if not result:
         raise HTTPException(status_code=404, detail="Task not found")
     return result
+
+
+@router.post("/export", response_model=ExportTestResponse)
+async def export_test_document(request: ExportTestRequest):
+    """
+    导出测试用例文档（Markdown 或 HTML 格式）。
+    包含函数基本信息、设计文档、语义意图、测试代码、执行结果和覆盖率。
+    """
+    task_id = request.task_id
+    result = RunnerService.get_result(task_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # 获取任务元数据
+    metadata = RunnerService.get_task_metadata(task_id)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="Task metadata not found")
+
+    project_id = metadata.get("project_id", "")
+    function_id = metadata.get("function_id", "")
+    language = metadata.get("language") or result.language or "c"
+    function_name = metadata.get("function_name", "")
+    source_file = metadata.get("source_file_path", "")
+    start_line = metadata.get("start_line", 1)
+    end_line = metadata.get("end_line", 1)
+
+    # 获取测试代码（优先取 cache 中带注释的版本）
+    test_code = metadata.get("test_code") or RunnerService.get_task_code(task_id) or ""
+
+    # 获取缓存数据（intent、设计文档注释版本）
+    cache_data = {}
+    if project_id and function_id:
+        try:
+            path, content, target_func, _ = _resolve_target_function(project_id, function_id)
+            cache_data = CacheService.get_function_data(project_id, path, _get_cache_key(target_func))
+            source_code = "\n".join(content.split('\n')[start_line - 1 : end_line])
+            function_signature = target_func.signature
+            qualified_name = getattr(target_func, "qualified_name", None)
+            class_name = getattr(target_func, "class_name", None)
+        except Exception:
+            source_code = ""
+            function_signature = function_name
+            qualified_name = None
+            class_name = None
+    else:
+        source_code = ""
+        function_signature = function_name
+        qualified_name = None
+        class_name = None
+
+    # 优先使用 cache 中的测试代码（可能已含注释）
+    test_code = cache_data.get("test_code") or test_code
+    function_intent = cache_data.get("intent") or ""
+
+    # 获取设计文档
+    design_doc = None
+    if project_id and function_name:
+        try:
+            design_doc = ProjectService.get_function_design_doc(
+                project_id, function_name, qualified_name=qualified_name
+            )
+        except Exception:
+            pass
+
+    # 构建测试结果摘要
+    test_result_summary = None
+    if result.test_result:
+        test_result_summary = {
+            "passed": result.test_result.passed,
+            "failed": result.test_result.failed,
+            "total": result.test_result.total,
+        }
+
+    # 构建覆盖率摘要
+    coverage_summary = None
+    if result.coverage and result.coverage.files:
+        coverage_summary = {
+            "files": [
+                {
+                    "file": fcov.file,
+                    "line": {
+                        "covered": fcov.line.covered,
+                        "total": fcov.line.total,
+                        "rate": fcov.line.rate,
+                    },
+                    "function": {
+                        "covered": fcov.function.covered,
+                        "total": fcov.function.total,
+                        "rate": fcov.function.rate,
+                    },
+                    "branch": {
+                        "covered": fcov.branch.covered,
+                        "total": fcov.branch.total,
+                        "rate": fcov.branch.rate,
+                    },
+                }
+                for fcov in result.coverage.files
+            ]
+        }
+
+    # 生成文档
+    content = LLMService.generate_export_document(
+        language=language,
+        function_name=function_name,
+        function_signature=function_signature,
+        qualified_name=qualified_name,
+        class_name=class_name,
+        source_file=source_file,
+        source_code=source_code,
+        function_intent=function_intent,
+        test_code=test_code,
+        design_doc=design_doc,
+        test_result=test_result_summary,
+        coverage=coverage_summary,
+        format=request.format,
+    )
+
+    ext_map = {"html": "html", "docx": "docx", "markdown": "md"}
+    ext = ext_map.get(request.format, "md")
+    safe_name = re.sub(r'[^\w\-.]', '_', function_name)
+    filename = f"test_doc_{safe_name}_{task_id[:8]}.{ext}"
+
+    return ExportTestResponse(
+        content=content,
+        format=request.format,
+        filename=filename,
+    )

@@ -71,7 +71,7 @@
           ref="codeContainer"
           @click="handleCodeClick"
         >
-          <code class="language-c hljs" v-html="highlightedCode"></code>
+          <code class="hljs" v-html="highlightedCode"></code>
         </pre>
       </div>
     </main>
@@ -230,7 +230,8 @@ const FileTreeNode = {
 
 const highlightedCode = computed(() => {
   if (!fileContent.value) return ''
-  const lang = selectedFile.value?.file_type === 'json' ? 'json' : 'c'
+  const fileType = selectedFile.value?.file_type
+  const lang = fileType === 'json' ? 'json' : fileType === 'py' ? 'python' : 'c'
   const result = hljs.highlight(fileContent.value, { language: lang }).value
   const highlightedLines = result.split('\n')
   
@@ -303,6 +304,7 @@ const fetchStructure = async () => {
   try {
     const response = await axios.get(`/api/project/${store.projectId}/structure`)
     structure.value = response.data
+    store.setProjectMeta(response.data.language, response.data.test_framework)
     treeData.value = buildTree(structure.value.files)
     
     // Check for query params to auto-select

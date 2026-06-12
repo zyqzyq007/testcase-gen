@@ -3,6 +3,14 @@
     <div class="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
       <!-- Left Column: Function Analysis -->
       <div class="space-y-6">
+        <!-- 上游数据可用性指示 -->
+        <div v-if="upstreamStatus.has_traceability" class="bg-indigo-50 border border-indigo-200 rounded-lg px-4 py-3 flex items-center gap-3 text-sm">
+          <Link2 class="w-4 h-4 text-indigo-600 flex-shrink-0" />
+          <span class="text-indigo-800">
+            已关联需求文档（{{ upstreamStatus.requirement_count }}条需求）&nbsp;|&nbsp;追溯链路已匹配（{{ upstreamStatus.trace_link_count }}条链接）
+          </span>
+        </div>
+
         <div class="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
           <div class="px-6 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
             <h2 class="font-bold text-slate-800 flex items-center gap-2">
@@ -216,10 +224,12 @@
         <!-- Generation Controls -->
         <div class="bg-slate-50 border border-slate-200 rounded-xl p-6 space-y-6">
           <div class="space-y-3">
-            <label class="text-sm font-bold text-slate-600 uppercase tracking-wider">测试框架</label>
+            <label class="text-sm font-bold text-slate-600 uppercase tracking-wider">
+              {{ isPythonProject ? '测试框架（Python 默认 pytest）' : '测试框架' }}
+            </label>
             <div class="grid grid-cols-3 gap-3">
               <button 
-                v-for="framework in ['unity', 'cmockery', 'gtest']" 
+                v-for="framework in availableFrameworks" 
                 :key="framework"
                 @click="selectedFramework = framework"
                 class="px-4 py-2 rounded-lg text-xs font-bold uppercase transition-all"
@@ -237,7 +247,7 @@
           >
             <Zap class="w-5 h-5" :class="{ 'animate-pulse': generating || annotating }" />
             <span>
-              {{ generating ? 'AI 正在编写测试代码...' : annotating ? 'AI 正在插入设计文档注释...' : '立即生成测试用例' }}
+              {{ generating ? (isPythonProject ? 'AI 正在编写 pytest 测试代码...' : 'AI 正在编写测试代码...') : annotating ? 'AI 正在插入设计文档注释...' : (isPythonProject ? '立即生成 pytest 测试用例' : '立即生成测试用例') }}
             </span>
           </button>
         </div>
@@ -255,7 +265,7 @@
               <button @click="copyCode" class="p-2 hover:bg-slate-200 rounded text-slate-500 transition-colors" title="复制代码">
                 <Copy class="w-4 h-4" />
               </button>
-              <button 
+              <button
                 @click="goToResult"
                 class="flex items-center space-x-2 px-3 py-1 bg-green-600 hover:bg-green-700 text-white text-[10px] font-bold uppercase rounded transition-colors shadow-sm"
               >
@@ -290,7 +300,7 @@
             </div>
 
             <pre v-if="generatedCode" ref="codeContainer" class="h-full overflow-auto m-0 p-6 font-mono text-sm leading-relaxed scroll-smooth">
-              <code class="language-c hljs" v-html="highlightedGeneratedCode"></code>
+              <code class="hljs" v-html="highlightedGeneratedCode"></code>
             </pre>
           </div>
         </div>
@@ -311,9 +321,9 @@ import { useRouter } from 'vue-router'
 import { useAppStore } from '../store'
 import axios from 'axios'
 import hljs from 'highlight.js'
-import { 
-  Code2, Network, Zap, FileCode, Sparkles, 
-  Copy, Play, RefreshCw
+import {
+  Code2, Network, Zap, FileCode, Sparkles,
+  Copy, Play, RefreshCw, Download, Link2
 } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -321,6 +331,7 @@ const store = useAppStore()
 
 const codeContainer = ref(null)
 const loading = ref(false)
+const upstreamStatus = ref({ has_requirements: false, has_traceability: false, requirement_count: 0, trace_link_count: 0 })
 const graphLoading = ref(false)
 const graphItemLoading = ref({
   call: false,
@@ -336,7 +347,10 @@ const graphItemReady = ref({
 })
 const generating = ref(false)
 const annotating = ref(false)  // 第二步：插入设计文档注释中
+const exporting = ref(false)
 const funcDetail = ref(null)
+const effectiveLanguage = computed(() => funcDetail.value?.language || store.projectLanguage || null)
+const isPythonProject = computed(() => effectiveLanguage.value === 'python')
 const codeGraph = ref({
   variables: [],
   calls: [],
@@ -347,7 +361,16 @@ const codeGraph = ref({
   pdg_image: null
 })
 
-const selectedFramework = ref('unity')
+const selectedFramework = ref(store.testFramework || 'unity')
+
+// Ensure selectedFramework follows project language changes (e.g. right after upload)
+watch(effectiveLanguage, (lang) => {
+  if (lang === 'python') {
+    selectedFramework.value = 'pytest'
+  } else if (!store.testFramework) {
+    selectedFramework.value = 'unity'
+  }
+}, { immediate: true })
 const generatedCode = ref('')
 const functionIntent = ref('')
 const intentLoading = ref(false)
@@ -356,7 +379,13 @@ const intentLoading = ref(false)
 
 const highlightedGeneratedCode = computed(() => {
   if (!generatedCode.value) return ''
-  return hljs.highlight(generatedCode.value, { language: 'c' }).value
+  const lang = isPythonProject.value ? 'python' : 'c'
+  return hljs.highlight(generatedCode.value, { language: lang }).value
+})
+
+const availableFrameworks = computed(() => {
+  if (isPythonProject.value) return ['pytest']
+  return ['unity', 'cmockery', 'gtest']
 })
 
 watch(generatedCode, () => {
@@ -416,6 +445,12 @@ const fetchFunctionDetail = async () => {
   try {
     const response = await axios.get(`/api/project/${store.projectId}/function/${store.functionId}`)
     funcDetail.value = response.data
+    if (response.data.language) {
+      store.setProjectMeta(response.data.language, response.data.language === 'python' ? 'pytest' : selectedFramework.value)
+      if (response.data.language === 'python') {
+        selectedFramework.value = 'pytest'
+      }
+    }
     // After basic info, fetch graph
     fetchCodeGraph()
     // Fetch history (intent, test case)
@@ -528,6 +563,11 @@ const generateTest = async () => {
 
   try {
     // ── 第一步：基于代码生成测试用例 ──
+    const controller = new AbortController()
+    // Client-side timeout to avoid indefinite hangs (configurable)
+    const STREAM_TIMEOUT = parseInt(import.meta.env.VITE_GENERATE_STREAM_TIMEOUT || '120000') // ms
+    const timeoutId = setTimeout(() => controller.abort(), STREAM_TIMEOUT)
+
     const response = await fetch('/api/testcase/generate/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -538,7 +578,8 @@ const generateTest = async () => {
         function_intent: functionIntent.value,
         failure_context: failureContext,
         failed_task_id: failedTaskId
-      })
+      }),
+      signal: controller.signal
     })
 
     if (!response.ok) throw new Error('Network response was not ok')
@@ -547,7 +588,8 @@ const generateTest = async () => {
     const decoder = new TextDecoder()
     let buffer = ''
     
-    while (true) {
+    try {
+      while (true) {
       const { done, value } = await reader.read()
       if (done) break
       
@@ -569,6 +611,20 @@ const generateTest = async () => {
           console.error('Parse error:', e, line)
         }
       }
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        console.warn('Generate stream aborted by client timeout')
+        alert('生成测试用例超时，中止。请稍后重试或增大超时配置。')
+      } else {
+        console.error('Generate stream error:', e)
+        alert('生成测试用例时发生错误')
+      }
+      generating.value = false
+      clearTimeout(timeoutId)
+      return
+    } finally {
+      clearTimeout(timeoutId)
     }
 
     // ── 第二步：若项目有设计文档，插入中文注释 ──
@@ -633,6 +689,56 @@ const copyCode = () => {
   alert('代码已复制到剪贴板')
 }
 
+const exportDocument = async (format = 'markdown') => {
+  if (!store.taskId) {
+    alert('请先生成测试用例')
+    return
+  }
+  exporting.value = true
+  try {
+    const response = await axios.post('/api/testcase/export', {
+      task_id: store.taskId,
+      format: format
+    })
+    const { content, filename } = response.data
+
+    if (format === 'docx') {
+      // base64 decode for binary formats
+      const byteChars = atob(content)
+      const byteNums = new Array(byteChars.length)
+      for (let i = 0; i < byteChars.length; i++) {
+        byteNums[i] = byteChars.charCodeAt(i)
+      }
+      const byteArr = new Uint8Array(byteNums)
+      const blob = new Blob([byteArr], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } else {
+      const mimeType = format === 'html' ? 'text/html' : 'text/markdown'
+      const blob = new Blob([content], { type: `${mimeType};charset=utf-8` })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }
+  } catch (error) {
+    console.error('Export failed:', error)
+    alert('导出文档失败: ' + (error.response?.data?.detail || error.message))
+  } finally {
+    exporting.value = false
+  }
+}
+
 const goToResult = () => {
   router.push('/result')
 }
@@ -654,8 +760,19 @@ const checkFailureAndGenerate = () => {
   }
 }
 
+const fetchUpstreamStatus = async () => {
+  if (!store.projectId) return
+  try {
+    const res = await axios.get(`/api/project/${store.projectId}/upstream-status`)
+    upstreamStatus.value = res.data
+  } catch (e) {
+    // 上游数据不可用，静默忽略
+  }
+}
+
 onMounted(() => {
   fetchFunctionDetail()
+  fetchUpstreamStatus()
   checkFailureAndGenerate()
 })
 

@@ -4,7 +4,8 @@ from typing import List, Dict, Optional, Any
 class GenerateTestRequest(BaseModel):
     project_id: str
     function_id: str
-    test_framework: str = "unity"
+    test_framework: Optional[str] = None
+    language: Optional[str] = None
     failure_context: Optional[str] = None
     function_intent: Optional[str] = None
     failed_task_id: Optional[str] = None
@@ -26,6 +27,8 @@ class GenerateTestResponse(BaseModel):
     task_id: str
     test_code: str
     status: str
+    language: Optional[str] = None
+    test_framework: Optional[str] = None
 
 class ExecuteTestRequest(BaseModel):
     task_id: str
@@ -62,6 +65,9 @@ class ExecuteTestResponse(BaseModel):
     task_id: str
     compile_success: bool
     execution_started: bool
+    language: Optional[str] = None
+    test_framework: Optional[str] = None
+    install_success: Optional[bool] = None
     test_result: Optional[TestResultDetail] = None
     coverage: Optional[TestCoverage] = None
     stdout: Optional[str] = None
@@ -69,3 +75,12 @@ class ExecuteTestResponse(BaseModel):
     source_code: Optional[str] = None
     function_start_line: Optional[int] = None
     function_end_line: Optional[int] = None  # Add this field
+
+class ExportTestRequest(BaseModel):
+    task_id: str
+    format: str = "markdown"  # "markdown" or "html"
+
+class ExportTestResponse(BaseModel):
+    content: str
+    format: str
+    filename: str
