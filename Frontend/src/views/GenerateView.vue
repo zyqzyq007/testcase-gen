@@ -4,10 +4,18 @@
       <!-- Left Column: Function Analysis -->
       <div class="space-y-6">
         <!-- 上游数据可用性指示 -->
-        <div v-if="upstreamStatus.has_traceability" class="bg-indigo-50 border border-indigo-200 rounded-lg px-4 py-3 flex items-center gap-3 text-sm">
-          <Link2 class="w-4 h-4 text-indigo-600 flex-shrink-0" />
-          <span class="text-indigo-800">
-            已关联需求文档（{{ upstreamStatus.requirement_count }}条需求）&nbsp;|&nbsp;追溯链路已匹配（{{ upstreamStatus.trace_link_count }}条链接）
+        <div v-if="upstreamStatus.has_traceability || upstreamStatus.has_requirements" class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 flex items-center gap-3 text-sm">
+          <Link2 class="w-4 h-4 text-blue-600 flex-shrink-0" />
+          <span class="text-blue-800">
+            <template v-if="upstreamStatus.has_traceability && upstreamStatus.has_requirements">
+              已关联需求文档（{{ upstreamStatus.requirement_count }}条需求）&nbsp;|&nbsp;追溯链路已匹配（{{ upstreamStatus.trace_link_count }}条链接）
+            </template>
+            <template v-else-if="upstreamStatus.has_traceability">
+              追溯链路已匹配（{{ upstreamStatus.trace_link_count }}条链接）&nbsp;|&nbsp;需求文档待上游工具生成
+            </template>
+            <template v-else>
+              已关联需求文档（{{ upstreamStatus.requirement_count }}条需求）&nbsp;|&nbsp;追溯链路待上游工具生成
+            </template>
           </span>
         </div>
 
@@ -46,6 +54,50 @@
                 </div>
               </div>
             </template>
+          </div>
+        </div>
+
+        <!-- 关联需求卡片（来自上游追溯工具） -->
+        <div v-if="requirementContext" class="bg-blue-50 border border-blue-200 rounded-xl overflow-hidden shadow-sm">
+          <div class="px-6 py-4 border-b border-blue-200 bg-blue-100/50 flex items-center justify-between">
+            <h2 class="font-bold text-blue-800 flex items-center gap-2">
+              <FileText class="w-4 h-4 text-blue-600" />
+              关联需求
+            </h2>
+            <span class="text-[10px] px-2 py-0.5 bg-blue-200 text-blue-700 rounded-full font-bold">
+              相似度 {{ (requirementContext.similarity * 100).toFixed(1) }}%
+            </span>
+          </div>
+          <div class="p-4 space-y-3">
+            <div>
+              <label class="text-[10px] font-bold text-blue-400 uppercase">需求标识</label>
+              <p class="text-sm font-bold text-blue-900">{{ requirementContext.requirement_label }}</p>
+            </div>
+            <div v-if="requirementContext.requirement_title">
+              <label class="text-[10px] font-bold text-blue-400 uppercase">需求标题</label>
+              <p class="text-sm text-blue-800">{{ requirementContext.requirement_title }}</p>
+            </div>
+            <div v-if="requirementContext.requirement_content">
+              <label class="text-[10px] font-bold text-blue-400 uppercase">需求内容</label>
+              <p class="text-sm text-blue-700 whitespace-pre-wrap leading-relaxed">{{ requirementContext.requirement_content }}</p>
+            </div>
+            <div v-if="requirementContext.tables && requirementContext.tables.length">
+              <label class="text-[10px] font-bold text-blue-400 uppercase">需求表格</label>
+              <div v-for="(tbl, ti) in requirementContext.tables" :key="ti" class="mt-2 border border-blue-200 rounded overflow-hidden">
+                <table class="w-full text-xs">
+                  <thead class="bg-blue-100">
+                    <tr>
+                      <th v-for="(h, hi) in tbl.headers" :key="hi" class="p-2 text-left font-bold text-blue-700 border-b border-blue-200">{{ h }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(row, ri) in tbl.rows" :key="ri" class="border-b border-blue-100 last:border-0">
+                      <td v-for="(cell, ci) in row" :key="ci" class="p-2 text-blue-800">{{ cell }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -323,7 +375,7 @@ import axios from 'axios'
 import hljs from 'highlight.js'
 import {
   Code2, Network, Zap, FileCode, Sparkles,
-  Copy, Play, RefreshCw, Download, Link2
+  Copy, Play, RefreshCw, Download, Link2, FileText
 } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -332,6 +384,7 @@ const store = useAppStore()
 const codeContainer = ref(null)
 const loading = ref(false)
 const upstreamStatus = ref({ has_requirements: false, has_traceability: false, requirement_count: 0, trace_link_count: 0 })
+const requirementContext = ref(null)
 const graphLoading = ref(false)
 const graphItemLoading = ref({
   call: false,
@@ -770,9 +823,22 @@ const fetchUpstreamStatus = async () => {
   }
 }
 
+const fetchRequirementContext = async () => {
+  if (!store.projectId || !store.functionId) return
+  try {
+    const res = await axios.get(
+      `/api/project/${store.projectId}/function/${store.functionId}/requirement-context`
+    )
+    requirementContext.value = res.data && res.data.requirement_label ? res.data : null
+  } catch (e) {
+    requirementContext.value = null
+  }
+}
+
 onMounted(() => {
   fetchFunctionDetail()
   fetchUpstreamStatus()
+  fetchRequirementContext()
   checkFailureAndGenerate()
 })
 

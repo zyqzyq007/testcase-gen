@@ -5,6 +5,11 @@
       <div class="text-center space-y-2">
         <h1 class="text-3xl font-bold text-slate-900">开始测试您的项目</h1>
         <p class="text-slate-500 font-medium">支持 C 或 Python 项目，上传源码文件或 .zip 压缩包以开始自动化测试生成</p>
+        <p class="text-xs text-slate-400 max-w-2xl mx-auto leading-relaxed">
+          离线环境提示：Python 项目可将
+          <code class="px-1 py-0.5 bg-slate-100 rounded text-primary-700">conda pack</code>
+          打包的环境（如 <code class="px-1 py-0.5 bg-slate-100 rounded text-primary-700">env.tar.gz</code>）连同源码一起放入 zip 上传，工具会自动识别并在该环境中运行测试，无需联网安装依赖。
+        </p>
       </div>
 
       <!-- Upload Card -->

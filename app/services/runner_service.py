@@ -586,93 +586,303 @@ class RunnerService:
         - venv 存放在项目可写目录下，跨任务复用
         - 通过依赖文件指纹判断是否需要重新安装
         - 离线环境下若 venv 已存在且依赖已满足则跳过安装
+        - 并发安全：批量首跑时多个任务会同时进入，用 mkdir 原子锁保证只有一个
+          任务真正创建/安装 .venv，其余任务等待 .venv 就绪后复用，避免并发写冲突
+          导致 venv 损坏或 pip 安装不完整。
         """
         local_dir = ProjectService.get_local_project_dir(project_id)
         venv_dir = os.path.join(local_dir, ".venv")
         hash_file = os.path.join(local_dir, ".venv.deps.hash")
         python_bin = os.path.join(venv_dir, "bin", "python")
         pip_bin = os.path.join(venv_dir, "bin", "pip")
+        lock_dir = os.path.join(local_dir, ".venv.lock")
 
         current_hash = RunnerService._compute_deps_fingerprint(project_dir)
-        cached_hash = ""
-        if os.path.exists(hash_file):
+
+        def _read_cached_hash() -> str:
+            if os.path.exists(hash_file):
+                try:
+                    with open(hash_file, "r") as f:
+                        return f.read().strip()
+                except Exception:
+                    pass
+            return ""
+
+        def _venv_ready() -> bool:
+            return os.path.exists(python_bin) and _read_cached_hash() == current_hash
+
+        # 快路径：venv 已就绪，直接复用（无需锁）
+        if _venv_ready():
+            return python_bin, pip_bin, None
+
+        # 需要构建 → 抢锁（mkdir 是原子操作）
+        def _try_acquire() -> bool:
             try:
-                with open(hash_file, "r") as f:
-                    cached_hash = f.read().strip()
-            except Exception:
-                pass
+                os.mkdir(lock_dir)
+                return True
+            except FileExistsError:
+                return False
 
-        venv_exists = os.path.exists(python_bin)
-        deps_changed = current_hash != cached_hash or not cached_hash
+        acquired = _try_acquire()
+        if not acquired:
+            # 等待持锁者完成构建（最多约 PYTHON_INSTALL_TIMEOUT/2 秒）
+            wait_steps = max(1, PYTHON_INSTALL_TIMEOUT // 2)
+            for _ in range(wait_steps):
+                if _venv_ready():
+                    return python_bin, pip_bin, None
+                await asyncio.sleep(1)
+            # 超时后再试抢一次锁（持锁者可能已崩溃）
+            acquired = _try_acquire()
 
-        # --- 创建或重建 venv ---
-        if not venv_exists or deps_changed:
-            if deps_changed and venv_exists:
-                # 依赖变更 → 重建干净的 venv
-                shutil.rmtree(venv_dir, ignore_errors=True)
-                venv_exists = False
+        if acquired:
+            try:
+                # 拿到锁后再次核对：等待期间可能已被别的任务建好
+                if _venv_ready():
+                    return python_bin, pip_bin, None
 
-            if not venv_exists:
-                rc, _, venv_err, timed_out = await RunnerService._run_subprocess(
-                    ["python3", "-m", "venv", ".venv"],
-                    cwd=local_dir,
-                    timeout=PYTHON_VENV_TIMEOUT,
-                )
-                if timed_out or rc != 0:
-                    return None, None, (
-                        "Virtualenv creation timed out"
-                        if timed_out
-                        else f"Virtualenv creation failed:\n{venv_err.decode(errors='replace')}"
+                cached_hash = _read_cached_hash()
+                venv_exists = os.path.exists(python_bin)
+                deps_changed = current_hash != cached_hash or not cached_hash
+
+                # --- 创建或重建 venv ---
+                if deps_changed and venv_exists:
+                    shutil.rmtree(venv_dir, ignore_errors=True)
+                    venv_exists = False
+                if not venv_exists:
+                    rc, _, venv_err, timed_out = await RunnerService._run_subprocess(
+                        ["python3", "-m", "venv", "--system-site-packages", ".venv"],
+                        cwd=local_dir,
+                        timeout=PYTHON_VENV_TIMEOUT,
                     )
+                    if timed_out or rc != 0:
+                        return None, None, (
+                            "Virtualenv creation timed out"
+                            if timed_out
+                            else f"Virtualenv creation failed:\n{venv_err.decode(errors='replace')}"
+                        )
 
-        # --- 安装依赖（仅在指纹变更时执行）---
-        if deps_changed:
-            install_cmds = [
-                [pip_bin, "install", "--disable-pip-version-check", "-q", "pytest", "coverage"],
-            ]
+                # --- 安装依赖（仅在指纹变更时执行）---
+                if deps_changed:
+                    install_cmds = [
+                        [pip_bin, "install", "--disable-pip-version-check", "-q", "pytest", "coverage", "pytest-cov"],
+                    ]
+                    pyproject_path = os.path.join(project_dir, "pyproject.toml")
+                    if os.path.exists(pyproject_path):
+                        install_cmds.append(
+                            [pip_bin, "install", "--disable-pip-version-check", "-q", "-e", "."]
+                        )
+                    requirements_path = os.path.join(project_dir, "requirements.txt")
+                    if os.path.exists(requirements_path):
+                        install_cmds.append(
+                            [pip_bin, "install", "--disable-pip-version-check", "-q", "-r", "requirements.txt"]
+                        )
 
-            pyproject_path = os.path.join(project_dir, "pyproject.toml")
-            if os.path.exists(pyproject_path):
-                install_cmds.append(
-                    [pip_bin, "install", "--disable-pip-version-check", "-q", "-e", "."]
-                )
+                    install_logs = []
+                    all_ok = True
+                    for cmd in install_cmds:
+                        rc, out, err, timed_out = await RunnerService._run_subprocess(
+                            cmd, cwd=project_dir, timeout=PYTHON_INSTALL_TIMEOUT
+                        )
+                        install_logs.append(out.decode(errors="replace"))
+                        install_logs.append(err.decode(errors="replace"))
+                        if timed_out or rc != 0:
+                            all_ok = False
 
-            requirements_path = os.path.join(project_dir, "requirements.txt")
-            if os.path.exists(requirements_path):
-                install_cmds.append(
-                    [pip_bin, "install", "--disable-pip-version-check", "-q", "-r", "requirements.txt"]
-                )
+                    if not all_ok:
+                        # 离线场景容错：如果 pytest + coverage 已经可用，继续执行
+                        rc_check, _, _, _ = await RunnerService._run_subprocess(
+                            [python_bin, "-c", "import pytest, coverage"],
+                            timeout=10,
+                        )
+                        if rc_check != 0:
+                            msg = "Dependency installation failed"
+                            return None, None, msg + ":\n" + "\n".join(install_logs)
 
-            install_logs = []
-            all_ok = True
-            for cmd in install_cmds:
+                    # 记录指纹（仅在安装成功时）
+                    try:
+                        with open(hash_file, "w") as f:
+                            f.write(current_hash)
+                    except Exception:
+                        pass
+
+                return python_bin, pip_bin, None
+            finally:
+                try:
+                    os.rmdir(lock_dir)
+                except OSError:
+                    pass
+
+        # 既没拿到锁、等待也超时：最后兜底——若 venv 至少可用就复用，否则报错
+        if os.path.exists(python_bin):
+            return python_bin, pip_bin, None
+        return None, None, "Virtualenv is being prepared by another task; please retry shortly."
+
+    @staticmethod
+    async def _ensure_conda_unpacked(
+        env_dir: str, env_python: str, run_env: Dict[str, str]
+    ) -> None:
+        """
+        一次性执行 conda-unpack（幂等 + 并发安全）。
+        - 用 .unpacked 标记文件避免重复执行
+        - 用 mkdir 作为原子文件锁，保证并发的批量任务只有一个执行 unpack
+        - conda-unpack 用 env 自带 python（PYTHONHOME 引导）启动，重写构建机旧前缀
+        - 失败视为非致命（真 conda-pack 的 bin/python 本就用相对路径，开箱即用）
+        """
+        marker = os.path.join(env_dir, ".unpacked")
+        if os.path.exists(marker):
+            return
+
+        lock_dir = os.path.join(env_dir, ".unpack.lock")
+        got_lock = False
+        try:
+            os.mkdir(lock_dir)  # 原子操作：成功者获得锁
+            got_lock = True
+        except FileExistsError:
+            pass
+
+        if not got_lock:
+            # 等待持锁任务完成（最多 ~90s），完成后直接返回
+            for _ in range(180):
+                if os.path.exists(marker):
+                    return
+                await asyncio.sleep(0.5)
+            return
+
+        try:
+            unpack_script = os.path.join(env_dir, "bin", "conda-unpack")
+            cmd = None
+            if os.path.exists(unpack_script):
+                cmd = [env_python, unpack_script]
+            elif shutil.which("conda"):
+                cmd = ["conda", "unpack", "--prefix", env_dir]
+            if cmd:
                 rc, out, err, timed_out = await RunnerService._run_subprocess(
-                    cmd, cwd=project_dir, timeout=PYTHON_INSTALL_TIMEOUT
+                    cmd, cwd=env_dir, env=run_env, timeout=PYTHON_INSTALL_TIMEOUT
                 )
-                install_logs.append(out.decode(errors="replace"))
-                install_logs.append(err.decode(errors="replace"))
-                if timed_out or rc != 0:
-                    all_ok = False
-                    # 不立即退出：尽量多装，最终统一检查
-
-            if not all_ok:
-                # 离线场景容错：如果 pytest + coverage 已经可用，继续执行
-                rc_check, _, _, _ = await RunnerService._run_subprocess(
-                    [python_bin, "-c", "import pytest, coverage"],
-                    timeout=10,
-                )
-                if rc_check != 0:
-                    msg = "Dependency installation failed"
-                    return None, None, msg + ":\n" + "\n".join(install_logs)
-
-            # 记录指纹（仅在安装成功时）
+                if timed_out:
+                    print("[conda-unpack] timed out (non-fatal)")
+                elif rc != 0:
+                    msg = (err.decode(errors='replace') if err else "") or (out.decode(errors='replace') if out else "")
+                    print(f"[conda-unpack] non-zero rc={rc} (non-fatal): {msg[:300]}")
             try:
-                with open(hash_file, "w") as f:
-                    f.write(current_hash)
+                with open(marker, "w") as f:
+                    f.write(datetime.now().isoformat())
             except Exception:
                 pass
+        finally:
+            try:
+                os.rmdir(lock_dir)
+            except OSError:
+                pass
 
-        return python_bin, pip_bin, None
+    @staticmethod
+    async def _prepare_conda_env(
+        project_id: str, project_dir: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        准备 conda-pack 离线环境，返回 (python_bin, env_dir_abs, error_msg)。
+
+        版本隔离原则：必须使用 env 自带的 Python（如 3.8），绝不回退到 Docker 宿主
+        Python（否则 C 扩展 .so 版本不匹配，且 PYTHONHOME 会让宿主 Python 崩溃）。
+
+        流程：
+        1. 用 _build_conda_env_vars（含 PYTHONHOME=env_dir）测试 env 自带 python；
+           真 conda-pack 的 bin/python 用相对路径解析 stdlib，开箱即用。
+        2. 若裸测失败，运行一次 conda-unpack（重写构建机旧前缀）后重试。
+        3. 仍不可用则硬失败，给出清晰错误（不静默回退系统 Python）。
+        """
+        meta = ProjectService.get_project_meta(project_id)
+        conda_env_rel = meta.get("conda_env_dir") or ".conda_env"
+        env_dir = os.path.join(project_dir, conda_env_rel)
+
+        if not os.path.isdir(env_dir):
+            return None, None, f"Conda env directory not found: {conda_env_rel}"
+
+        env_python = os.path.join(env_dir, "bin", "python")
+        if not os.path.exists(env_python):
+            return None, None, f"Python interpreter not found in conda env: {env_python}"
+
+        run_env = RunnerService._build_conda_env_vars(env_dir)
+
+        async def _env_python_ok() -> bool:
+            rc, _, _, _ = await RunnerService._run_subprocess(
+                [env_python, "-c", "import sys; print(sys.version.split()[0])"],
+                env=run_env, timeout=20,
+            )
+            return rc == 0
+
+        # 1) 直接测试 env 自带 python
+        if not await _env_python_ok():
+            # 2) 尝试 conda-unpack 修复前缀后重试
+            await RunnerService._ensure_conda_unpacked(env_dir, env_python, run_env)
+            ok = await _env_python_ok()
+        else:
+            ok = True
+
+        if not ok:
+            return None, None, (
+                "Conda env Python interpreter is not functional.\n"
+                f"  interpreter: {env_python}\n"
+                "The packed environment may be corrupted, built for an incompatible "
+                "platform, or missing its bundled standard library.\n"
+                "Please rebuild it with `conda pack` (not a plain venv), so that "
+                "bin/python + lib/pythonX.Y/stdlib + site-packages are all bundled."
+            )
+
+        return env_python, env_dir, None
+
+    @staticmethod
+    def _build_conda_env_vars(env_dir: str) -> Dict[str, str]:
+        """
+        构造等价于 `source bin/activate` 的环境变量字典（供 subprocess env 合并用）。
+        - PATH 前置 env_dir/bin
+        - VIRTUAL_ENV 指向环境根（触发 Python venv 发现机制）
+        - CONDA_PREFIX 指向环境根
+        - LD_LIBRARY_PATH 前置 env_dir/lib（C 扩展 .so 依赖）
+        - 若缺少 pyvenv.cfg，则手动将 env 内 site-packages 加入 PYTHONPATH
+        """
+        env = os.environ.copy()
+        env["PATH"] = os.path.join(env_dir, "bin") + os.pathsep + env.get("PATH", "")
+        env["VIRTUAL_ENV"] = env_dir
+        # PYTHONHOME 让 env 自带 Python 二进制从 env/lib/pythonX.Y 加载 stdlib，
+        # 不依赖宿主机 Python 路径（实现真正的版本隔离）
+        env["PYTHONHOME"] = env_dir
+        env["CONDA_PREFIX"] = env_dir
+        env["CONDA_DEFAULT_ENV"] = os.path.basename(env_dir)
+        lib_dir = os.path.join(env_dir, "lib")
+        if os.path.isdir(lib_dir):
+            env["LD_LIBRARY_PATH"] = lib_dir + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+
+        # 兜底：把 env 内 site-packages 加入 PYTHONPATH，解决跨 Python 版本
+        # （如 env 用 3.8 构建但宿主运行时是 3.10）导致 venv 发现机制找不到
+        # site-packages 的问题。
+        # 关键：只加入【与 bin/python 实际版本匹配】的 site-packages，避免多版本
+        # site-packages 互相污染（3.8 解释器加载 3.10 编译的 .so 会 ImportError）。
+        # 版本通过 bin/python 的真实指向（python3.X）推断，无需额外子进程。
+        py_tag = None
+        try:
+            real_py = os.path.realpath(os.path.join(env_dir, "bin", "python"))
+            m = re.match(r"python(\d+\.\d+)$", os.path.basename(real_py))
+            if m:
+                py_tag = "python" + m.group(1)
+        except Exception:
+            pass
+
+        sp_dirs = []
+        if py_tag:
+            sp = os.path.join(lib_dir, py_tag, "site-packages")
+            if os.path.isdir(sp):
+                sp_dirs.append(sp)
+        if not sp_dirs and os.path.isdir(lib_dir):
+            # 回退：推断失败（罕见）时才无差别扫描
+            for entry in sorted(os.listdir(lib_dir)):
+                sp = os.path.join(lib_dir, entry, "site-packages")
+                if os.path.isdir(sp):
+                    sp_dirs.append(sp)
+        if sp_dirs:
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = os.pathsep.join(sp_dirs) + (os.pathsep + existing if existing else "")
+        return env
 
     @staticmethod
     async def _execute_python_task(task_id: str, task_dir: str, metadata: Dict[str, Any]) -> ExecuteTestResponse:
@@ -682,12 +892,12 @@ class RunnerService:
             return [
                 n
                 for n in names
-                if n in {".venv", "__pycache__", ".pytest_cache"}
+                if n in {".venv", "__pycache__", ".pytest_cache", ".conda_env"}
                 or n.endswith((".pyc", ".pyo", ".coverage"))
             ]
 
         for item in os.listdir(project_dir):
-            if item == "_tasks":
+            if item in ("_tasks", ".conda_env", ".venv"):
                 continue
             s = os.path.join(project_dir, item)
             d = os.path.join(task_dir, item)
@@ -698,10 +908,25 @@ class RunnerService:
 
         test_file_name = RunnerService._get_test_file_name(metadata)
 
-        # 使用项目级持久化 venv（跨任务复用，避免每次都重新安装依赖）
-        python_bin, pip_bin, venv_error = await RunnerService._prepare_project_venv(
-            metadata["project_id"], project_dir
-        )
+        # 根据项目是否携带 conda-pack 离线环境分流：
+        #   conda_pack → 复用用户上传的预置环境（含解释器），全程不联网
+        #   否则      → 回退到现有 _prepare_project_venv（联网 pip install）
+        meta = ProjectService.get_project_meta(metadata["project_id"])
+        env_source = meta.get("env_source", "none")
+
+        conda_env_dir_abs = None
+        pip_bin = None
+        if env_source == "conda_pack":
+            python_bin, conda_env_dir_abs, venv_error = await RunnerService._prepare_conda_env(
+                metadata["project_id"], project_dir
+            )
+            if python_bin:
+                pip_bin = os.path.join(os.path.dirname(python_bin), "pip")
+        else:
+            python_bin, pip_bin, venv_error = await RunnerService._prepare_project_venv(
+                metadata["project_id"], project_dir
+            )
+
         if venv_error:
             metadata["error"] = {"compile_error": venv_error, "stage": "venv"}
             with open(os.path.join(task_dir, "metadata.json"), "w") as f:
@@ -717,11 +942,164 @@ class RunnerService:
                 stderr=venv_error,
             )
 
-        env = os.environ.copy()
+        # 构造运行环境变量：conda 环境用等价 activate 的变量集合，venv 用基础环境
+        if conda_env_dir_abs:
+            env = RunnerService._build_conda_env_vars(conda_env_dir_abs)
+        else:
+            env = os.environ.copy()
         env["PYTHONPATH"] = task_dir + (f":{env['PYTHONPATH']}" if env.get("PYTHONPATH") else "")
 
+        # 预检：验证被测模块及其依赖在当前环境下是否可导入。
+        # 关键：只对【依赖缺失】(ModuleNotFoundError) 短路报错并给出清晰提示；
+        # 被测模块顶层副作用代码（读 argv、相对路径 open、联网等）抛出的其它异常
+        # 不视为依赖问题——放行交由 pytest 处理，避免误报“依赖未安装”。
+        source_file = metadata.get("source_file_path", "")
+        if source_file.endswith(".py"):
+            module_name = source_file.replace("/", ".").replace("\\", ".").removesuffix(".py")
+            module_name = module_name.lstrip(".")
+            # 模块名若以数字开头（如 "123.dir.module"），标准 import 语法报 SyntaxError
+            # 此时改用 importlib 按文件路径加载，绕过标识符限制
+            first_part = module_name.split(".")[0]
+            if first_part and first_part[0].isdigit():
+                # 文件路径导入
+                py_path = os.path.join(task_dir, source_file)
+                check_snippet = (
+                    "import importlib.util as _u,sys;"
+                    "try:\n"
+                    f"  _s = _u.spec_from_file_location('_precheck', r'{py_path}');\n"
+                    "  _m = _u.module_from_spec(_s); _s.loader.exec_module(_m)\n"
+                    "except ModuleNotFoundError as _e:\n"
+                    "  print('MISSING_DEP:', _e); sys.exit(2)\n"
+                    "except Exception:\n"
+                    "  pass\n"
+                )
+                rc_check, check_out, check_err, _ = await RunnerService._run_subprocess(
+                    [python_bin, "-c", check_snippet],
+                    cwd=task_dir, env=env, timeout=15,
+                )
+            else:
+                check_snippet = (
+                    "import sys\n"
+                    "try:\n"
+                    f"  import {module_name}\n"
+                    "except ModuleNotFoundError as _e:\n"
+                    "  print('MISSING_DEP:', _e); sys.exit(2)\n"
+                    "except Exception:\n"
+                    "  pass\n"
+                )
+                rc_check, check_out, check_err, _ = await RunnerService._run_subprocess(
+                    [python_bin, "-c", check_snippet],
+                    cwd=task_dir, env=env, timeout=15,
+                )
+            missing_dep = (rc_check == 2)  # 仅依赖缺失才短路
+            if rc_check not in (0, 2):
+                # 子进程启动失败等，保守放行
+                missing_dep = False
+            if missing_dep:
+                err_text = (check_err.decode(errors="replace") if check_err else "") or (check_out.decode(errors="replace") if check_out else "")
+                if env_source == "conda_pack":
+                    dep_error = (
+                        f"Module '{module_name}' failed to import in the conda env.\n"
+                        f"A dependency is not included in env.tar.gz. Please rebuild the\n"
+                        f"environment with `conda pack` after installing ALL project deps\n"
+                        f"(e.g. `conda install numpy ...` or `pip install -r requirements.txt`)\n"
+                        f"inside the env, then re-pack and re-upload.\n"
+                        f"conda env dir: {conda_env_dir_abs}\n\n"
+                        f"Import error:\n{err_text}"
+                    )
+                else:
+                    dep_error = (
+                        f"Module '{module_name}' failed to import.\n"
+                        f"This means the project has dependencies that are not installed.\n"
+                        f"Install them before running tests, or add them to the Docker image.\n\n"
+                        f"Import error:\n{err_text}"
+                    )
+                metadata["error"] = {"compile_error": dep_error, "stage": "import_check"}
+                with open(os.path.join(task_dir, "metadata.json"), "w") as f:
+                    json.dump(metadata, f, default=str)
+                RunnerService._save_cache_result(metadata, task_id, False)
+                return ExecuteTestResponse(
+                    task_id=task_id,
+                    compile_success=False,
+                    execution_started=False,
+                    language="python",
+                    test_framework=metadata.get("test_framework", "pytest"),
+                    install_success=False,
+                    stderr=dep_error,
+                )
+
+        # 确保 pytest-cov 可用（已有项目的 venv 缓存可能缺少该包）
+        rc_pytest_cov, _, _, _ = await RunnerService._run_subprocess(
+            [python_bin, "-c", "import pytest_cov"],
+            cwd=task_dir, timeout=10)
+        coverage_warning = ""
+        if rc_pytest_cov != 0:
+            # 在线/离线场景均尝试安装；若 pip 也失败则回退到 coverage run
+            if pip_bin:
+                pip_rc, _, pip_err, _ = await RunnerService._run_subprocess(
+                    [pip_bin, "install", "--disable-pip-version-check", "-q", "pytest-cov"],
+                    cwd=task_dir, timeout=60)
+                if pip_rc != 0:
+                    # 离线 conda 环境常装不上：把根因透出给用户，避免覆盖率静默为 0
+                    detail = pip_err.decode(errors="replace").strip() if pip_err else "unknown error"
+                    coverage_warning = (
+                        "pytest-cov could not be installed in this environment "
+                        "(likely offline conda env). Falling back to `coverage run`; "
+                        "coverage statistics may be unavailable. Rebuild the env with "
+                        "pytest-cov pre-installed for full coverage.\n"
+                        f"pip stderr: {detail}"
+                    )
+
+        # 写入 conftest.py：显式将 task_dir 与包根加入 sys.path，
+        # 解决 coverage/pytest-cov 在 venv 下 PYTHONPATH 被丢弃的问题，
+        # 同时支持 src-layout（包根 ≠ task_dir）的多层包导入。
+        # 注意：若项目自带 conftest.py，只【前置追加】路径注入，保留其原有内容
+        # （fixtures / autouse 钩子 / 自定义插件等），绝不能整体覆盖。
+        conftest_path = os.path.join(task_dir, "conftest.py")
+        injection_lines = ["import sys", f"sys.path.insert(0, {task_dir!r})"]
+        # 向上回溯到包根：第一个不含 __init__.py 的祖先目录
+        cur = os.path.dirname(os.path.abspath(os.path.join(task_dir, source_file)))
+        task_dir_abs = os.path.abspath(task_dir)
+        seen = set()
+        while cur and cur not in seen and os.path.isfile(os.path.join(cur, "__init__.py")):
+            seen.add(cur)
+            cur = os.path.dirname(cur)
+        if cur and os.path.abspath(cur) != task_dir_abs:
+            injection_lines.append(f"sys.path.insert(0, {cur!r})")
+        injection = "\n".join(injection_lines) + "\n"
+        if os.path.exists(conftest_path):
+            try:
+                with open(conftest_path, "r", encoding="utf-8") as f:
+                    existing = f.read()
+                with open(conftest_path, "w", encoding="utf-8") as f:
+                    f.write(injection + "\n" + existing)
+            except Exception:
+                with open(conftest_path, "w", encoding="utf-8") as f:
+                    f.write(injection)
+        else:
+            with open(conftest_path, "w", encoding="utf-8") as f:
+                f.write(injection)
+
+        # 根据 pytest-cov 是否可用选择测试命令
+        use_pytest_cov = rc_pytest_cov == 0  # 之前已有或刚装好
+        if not use_pytest_cov:
+            rc_retry, _, _, _ = await RunnerService._run_subprocess(
+                [python_bin, "-c", "import pytest_cov"],
+                cwd=task_dir, timeout=10)
+            use_pytest_cov = rc_retry == 0
+
+        if use_pytest_cov:
+            test_cmd = [python_bin, "-m", "pytest", "-q", "--tb=short",
+                        "--cov", "--cov-branch", "--cov-report=json:coverage.json",
+                        test_file_name]
+        else:
+            # fallback: coverage run 需要显式确保 PYTHONPATH 传递
+            env["COVERAGE_FILE"] = os.path.join(task_dir, ".coverage")
+            test_cmd = [python_bin, "-m", "coverage", "run", "--branch",
+                        "-m", "pytest", "-q", test_file_name]
+
         rc, run_stdout, run_stderr, timed_out = await RunnerService._run_subprocess(
-            [python_bin, "-m", "coverage", "run", "--branch", "-m", "pytest", "-q", test_file_name],
+            test_cmd,
             cwd=task_dir,
             env=env,
             timeout=PYTEST_TIMEOUT,
@@ -739,12 +1117,16 @@ class RunnerService:
                 failed = 1
         total = passed + failed + ignored
 
-        rc_cov, cov_out, cov_err, cov_timed_out = await RunnerService._run_subprocess(
-            [python_bin, "-m", "coverage", "json", "-o", "coverage.json"],
-            cwd=task_dir,
-            env=env,
-            timeout=30,
-        )
+        # coverage run 回退分支只生成二进制 .coverage，不会产出 coverage.json；
+        # 这里显式转换，否则 _parse_python_coverage 会静默返回 0 覆盖率。
+        cov_json_path = os.path.join(task_dir, "coverage.json")
+        if not use_pytest_cov and not os.path.exists(cov_json_path):
+            await RunnerService._run_subprocess(
+                [python_bin, "-m", "coverage", "json", "-o", "coverage.json"],
+                cwd=task_dir, env=env, timeout=30)
+
+        # pytest-cov generates coverage.json directly; no separate coverage step needed
+        cov_timed_out = False
         coverage_data = RunnerService._parse_python_coverage(
             os.path.join(task_dir, "coverage.json"),
             task_dir,
@@ -780,10 +1162,14 @@ class RunnerService:
                 source_code_content = f.read()
 
         stderr_combined = (run_stderr.decode(errors='replace') if run_stderr else "")
-        if rc_cov is None:
-            stderr_combined += "\nCoverage subprocess failed to start"
-        elif rc_cov != 0:
-            stderr_combined += "\n" + (cov_err.decode(errors='replace') if cov_err else "") + (cov_out.decode(errors='replace') if cov_out else "")
+        if coverage_warning:
+            stderr_combined += "\n" + coverage_warning
+        # pytest-cov includes coverage warnings/errors in the test output itself;
+        # check if coverage.json was generated as a sanity check
+        if cov_timed_out:
+            stderr_combined += "\nCoverage report generation timed out"
+        elif not os.path.exists(os.path.join(task_dir, "coverage.json")):
+            stderr_combined += "\nCoverage report (coverage.json) was not generated"
 
         return ExecuteTestResponse(
             task_id=task_id,

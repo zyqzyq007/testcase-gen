@@ -251,6 +251,7 @@ async def generate_testcase_stream(request: GenerateTestRequest):
         target_func.name,
         path,
         signature=getattr(target_func, "signature", None),
+        strict_rank1=True,
     )
 
     async def stream_generator():
@@ -349,6 +350,7 @@ async def generate_testcase(request: GenerateTestRequest):
         target_func.name,
         path,
         signature=getattr(target_func, "signature", None),
+        strict_rank1=True,
     )
 
     # 3. Call LLM

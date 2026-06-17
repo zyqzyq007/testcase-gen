@@ -42,16 +42,16 @@
           <button
             @click="exportDocument('docx')"
             :disabled="exporting"
-            class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 text-white text-xs font-bold uppercase rounded flex items-center gap-2 transition-all shadow-sm"
+            class="px-4 py-2 bg-white hover:bg-slate-100 disabled:bg-slate-100 disabled:text-slate-300 text-slate-700 border border-slate-300 text-xs font-bold uppercase rounded flex items-center gap-2 transition-colors"
           >
-            <Download class="w-3.5 h-3.5" :class="{ 'animate-pulse': exporting }" />
+            <Download class="w-3.5 h-3.5" />
             {{ exporting ? '导出中...' : '导出 DOCX' }}
           </button>
 
           <button
             @click="exportDocument('markdown')"
             :disabled="exporting"
-            class="px-4 py-2 bg-slate-100 hover:bg-slate-200 disabled:bg-slate-50 disabled:text-slate-300 text-slate-700 text-xs font-bold uppercase rounded flex items-center gap-2 transition-colors"
+            class="px-4 py-2 bg-white hover:bg-slate-100 disabled:bg-slate-100 disabled:text-slate-300 text-slate-700 border border-slate-300 text-xs font-bold uppercase rounded flex items-center gap-2 transition-colors"
             title="导出 Markdown"
           >
             <Download class="w-3.5 h-3.5" />
@@ -71,7 +71,7 @@
           <button
             @click="startExecution"
             :disabled="executing || fixing || exporting"
-            class="px-4 py-2 bg-slate-100 hover:bg-slate-200 disabled:bg-slate-50 disabled:text-slate-300 text-slate-700 text-xs font-bold uppercase rounded flex items-center gap-2 transition-colors"
+            class="px-4 py-2 bg-white hover:bg-slate-100 disabled:bg-slate-100 disabled:text-slate-300 text-slate-700 border border-slate-300 text-xs font-bold uppercase rounded flex items-center gap-2 transition-colors"
           >
             <RotateCw class="w-3.5 h-3.5" :class="{ 'animate-spin': executing && progress === 100 }" />
             重新执行

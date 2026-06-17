@@ -41,6 +41,7 @@ class UploadResponse(BaseModel):
     language: Optional[str] = None
     test_framework: Optional[str] = None
     dependency_manager: Optional[str] = None
+    env_source: Optional[str] = None  # "conda_pack" = 已检测到离线 conda 环境; "none" = 无
 
 class TestTargetFunctionInfo(BaseModel):
     function_id: str

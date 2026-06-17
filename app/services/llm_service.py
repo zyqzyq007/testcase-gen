@@ -499,7 +499,7 @@ Requirements:
 2. Use pytest style tests.
 3. Prefer direct imports from the target module.
 4. Keep the file concise: 2-4 focused tests are enough.
-5. Use pytest.raises for exception cases.
+5. Use pytest.raises for exception cases. If you provide a `match` argument, always use a raw string (r"...") to avoid invalid escape sequence warnings. For literal parentheses in the match pattern, write \\( and \\) inside the raw string.
 6. Do not add explanations or markdown outside the code block.
 7. Do not redefine the target implementation inside the test file.
 8. If the target is a class method, instantiate the class only if necessary.

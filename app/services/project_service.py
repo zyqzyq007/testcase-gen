@@ -1,10 +1,11 @@
 import os
 import shutil
-import uuid
+import tarfile
 import zipfile
+import uuid
 from datetime import datetime
 from fastapi import UploadFile, HTTPException
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 # 源码读取目录：集成模式下指向共享卷（只读），独立模式下指向本地 workspaces/
 WORKSPACES_DIR = os.path.abspath(os.getenv("UNIPORTAL_STORAGE_PATH", "workspaces"))
@@ -32,7 +33,7 @@ class ProjectService:
         dependency_manager = "pip"
 
         for root, dirs, files in os.walk(project_dir):
-            dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "__pycache__", "node_modules", "_cache", "_tasks", ".pytest_cache"}]
+            dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "__pycache__", "node_modules", "_cache", "_tasks", ".pytest_cache", ".conda_env"}]
             for f in files:
                 rel_path = os.path.relpath(os.path.join(root, f), project_dir)
                 files_seen.add(rel_path)
@@ -82,6 +83,173 @@ class ProjectService:
                 return {}
         return {}
 
+    # conda-pack 环境包识别时优先匹配的文件名前缀（大小写不敏感）
+    _CONDA_ENV_HINTS = ("env", "environment", "conda", "venv")
+
+    @staticmethod
+    def _looks_like_conda_env_name(fname: str) -> bool:
+        """文件名是否暗示这是一个 conda-pack 环境包（如 env.tar.gz）。"""
+        lower = fname.lower()
+        base = lower.rsplit(".", 1)[0] if lower.endswith((".gz", ".bz2")) else lower
+        base = base.replace("-", "_").replace(".", "_")
+        return any(base == hint or base.startswith(hint + "_") for hint in ProjectService._CONDA_ENV_HINTS)
+
+    @staticmethod
+    def _archive_is_conda_env(path: str) -> bool:
+        """
+        打开压缩包窥探，判断顶层（或第一层目录下）是否含 bin/ + conda-meta/，
+        这是 conda-pack 打包环境的典型结构。
+        支持 .tar.gz / .tgz / .tar.bz2 / .zip。
+        """
+        lower = path.lower()
+        try:
+            if lower.endswith((".tar.gz", ".tgz")):
+                opener = lambda p: tarfile.open(p, "r:gz")
+            elif lower.endswith(".tar.bz2"):
+                opener = lambda p: tarfile.open(p, "r:bz2")
+            elif lower.endswith(".tar"):
+                opener = lambda p: tarfile.open(p, "r:")
+            elif lower.endswith(".zip"):
+                opener = lambda p: zipfile.ZipFile(p, "r")
+            else:
+                return False
+            with opener(path) as arc:
+                if isinstance(arc, zipfile.ZipFile):
+                    names = arc.namelist()
+                else:
+                    names = arc.getnames()
+        except Exception:
+            return False
+
+        # 规范化成员名：去掉开头的 "/" 或 "./"，便于统一匹配
+        # （conda-pack 打包出来是根级 bin/、conda-meta/，无 "./" 前缀；
+        #  而 `tar -czf x .` 打包则带 "./" 前缀，两种都要兼容）
+        norm = []
+        for n in names:
+            n = n.lstrip("/")
+            if n.startswith("./"):
+                n = n[2:]
+            norm.append(n)
+        names = norm
+
+        def _has_marker(prefixes):
+            for p in prefixes:
+                # p 为 "" (根级) 或 "dirname/" (单层包裹目录)
+                has_bin = any(n == p + "bin" or n.startswith(p + "bin/") for n in names)
+                has_meta = any(n.startswith(p + "conda-meta/") for n in names)
+                if has_bin and has_meta:
+                    return True
+            return False
+
+        # 情况1: 顶层直接是 bin/ + conda-meta/（conda-pack 默认输出）
+        # 情况2: 单层包裹目录 <dir>/bin/ + <dir>/conda-meta/
+        prefixes = [""]
+        # 收集所有"第一层目录"作为候选前缀
+        first_dirs = set()
+        for n in names:
+            if "/" in n:
+                first_dirs.add(n.split("/")[0])
+        prefixes += [d + "/" for d in first_dirs]
+        return _has_marker(prefixes)
+
+    @staticmethod
+    def _extract_conda_env(archive_path: str, dest_dir: str) -> bool:
+        """
+        把 conda-pack 环境包解压到 dest_dir，保证 dest_dir 下直接是 bin/ conda-meta/。
+        若包内多了一层包裹目录，则把内层上移。
+        解压成功返回 True。
+        """
+        os.makedirs(dest_dir, exist_ok=True)
+        lower = archive_path.lower()
+        try:
+            if lower.endswith((".tar.gz", ".tgz")):
+                with tarfile.open(archive_path, "r:gz") as t:
+                    t.extractall(dest_dir)
+            elif lower.endswith(".tar.bz2"):
+                with tarfile.open(archive_path, "r:bz2") as t:
+                    t.extractall(dest_dir)
+            elif lower.endswith(".tar"):
+                with tarfile.open(archive_path, "r:") as t:
+                    t.extractall(dest_dir)
+            elif lower.endswith(".zip"):
+                with zipfile.ZipFile(archive_path, "r") as z:
+                    z.extractall(dest_dir)
+            else:
+                return False
+        except Exception:
+            return False
+
+        # 如果解出来多了一层包裹目录，把内层内容上移
+        if not (os.path.isdir(os.path.join(dest_dir, "bin")) and os.path.isdir(os.path.join(dest_dir, "conda-meta"))):
+            for entry in os.listdir(dest_dir):
+                inner = os.path.join(dest_dir, entry)
+                if os.path.isdir(inner) and os.path.isdir(os.path.join(inner, "bin")) and os.path.isdir(os.path.join(inner, "conda-meta")):
+                    # 把 inner/* 移到 dest_dir
+                    for item in os.listdir(inner):
+                        shutil.move(os.path.join(inner, item), os.path.join(dest_dir, item))
+                    try:
+                        os.rmdir(inner)
+                    except OSError:
+                        pass
+                    break
+        return os.path.isdir(os.path.join(dest_dir, "bin")) and os.path.isdir(os.path.join(dest_dir, "conda-meta"))
+
+    @staticmethod
+    def _safe_extract_tar(archive_path: str, dest_dir: str) -> bool:
+        """把普通 tar 源码包解压到 dest_dir（非 conda 环境包的通用解压）。成功返回 True。"""
+        os.makedirs(dest_dir, exist_ok=True)
+        lower = archive_path.lower()
+        try:
+            if lower.endswith((".tar.gz", ".tgz")):
+                mode = "r:gz"
+            elif lower.endswith(".tar.bz2"):
+                mode = "r:bz2"
+            elif lower.endswith(".tar"):
+                mode = "r:"
+            else:
+                return False
+            with tarfile.open(archive_path, mode) as t:
+                t.extractall(dest_dir)
+        except Exception:
+            return False
+        return True
+
+    @staticmethod
+    def _scan_for_conda_env(project_dir: str) -> Optional[Dict[str, Any]]:
+        """
+        扫描项目目录（最多 3 层）查找 conda-pack 环境包。
+        返回 {"archive_path": ..., "conda_env_dir": ".conda_env"} 或 None。
+        解压后的环境统一放入 project_dir/.conda_env。
+        """
+        candidates = []
+        for root, dirs, files in os.walk(project_dir):
+            depth = root[len(project_dir):].count(os.sep)
+            if depth > 3:
+                dirs[:] = []
+                continue
+            for f in files:
+                lower = f.lower()
+                if not lower.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tar", ".zip")):
+                    continue
+                # 跳过源码 zip 本身的二次嵌套、以及 meta.json 等
+                full = os.path.join(root, f)
+                # 优先：名字暗示是环境包；否则也允许内容判断兜底
+                name_hit = ProjectService._looks_like_conda_env_name(f)
+                content_hit = ProjectService._archive_is_conda_env(full)
+                if name_hit or content_hit:
+                    candidates.append((full, name_hit, content_hit))
+
+        if not candidates:
+            return None
+        # 排序：内容确认为准优先，其次名字命中
+        candidates.sort(key=lambda x: (not x[2], not x[1]))
+        archive_path = candidates[0][0]
+
+        return {
+            "archive_path": archive_path,
+            "conda_env_dir": ".conda_env",
+        }
+
     @staticmethod
     async def create_project(file: UploadFile, project_name: str = None) -> Tuple[str, str, int]:
         project_id = f"proj_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
@@ -100,14 +268,49 @@ class ProjectService:
             shutil.copyfileobj(file.file, buffer)
 
         file_count = 0
-        if file.filename.endswith(".zip"):
+        lower_name = file.filename.lower()
+        is_zip = lower_name.endswith(".zip")
+        is_tar = lower_name.endswith((".tar.gz", ".tgz", ".tar.bz2", ".tar"))
+        is_srcfile = lower_name.endswith((".c", ".h", ".py"))
+
+        env_source = "none"
+        conda_env_dir = None
+
+        if is_zip:
             with zipfile.ZipFile(file_location, 'r') as zip_ref:
                 zip_ref.extractall(project_dir)
-            # Remove the zip file after extraction
             os.remove(file_location)
-        else:
-            if file.filename.endswith(('.c', '.h', '.py')):
-                file_count = 1
+        elif is_tar:
+            # tar 族：可能是源码包，也可能是用户直接上传的 conda-pack 环境包本身
+            if ProjectService._archive_is_conda_env(file_location):
+                # 直接就是离线环境包 → 解到 .conda_env，无需再扫描
+                dest = os.path.join(project_dir, ".conda_env")
+                if ProjectService._extract_conda_env(file_location, dest):
+                    env_source = "conda_pack"
+                    conda_env_dir = ".conda_env"
+                os.remove(file_location)
+            else:
+                # 当作源码包解压（其中可能仍嵌套 env.tar.gz，交给下面扫描处理）
+                ProjectService._safe_extract_tar(file_location, project_dir)
+                os.remove(file_location)
+        elif is_srcfile:
+            file_count = 1
+
+        # 扫描并解压嵌套的 conda-pack 离线环境包（Python 项目专用）
+        # 直接上传的环境包已在上面处理；这里只处理 zip / 源码包 tar / 单 .py 内嵌套的 env
+        if (is_zip or is_tar or file.filename.endswith(".py")) and env_source == "none":
+            env_info = ProjectService._scan_for_conda_env(project_dir)
+            if env_info:
+                dest = os.path.join(project_dir, env_info["conda_env_dir"])
+                ok = ProjectService._extract_conda_env(env_info["archive_path"], dest)
+                if ok:
+                    env_source = "conda_pack"
+                    conda_env_dir = env_info["conda_env_dir"]
+                    # 删除原始环境包压缩文件，节省空间
+                    try:
+                        os.remove(env_info["archive_path"])
+                    except OSError:
+                        pass
 
         # Scan for function design documents (JSON files with function_design structure)
         design_docs = {}
@@ -148,6 +351,8 @@ class ProjectService:
             "language": language,
             "test_framework": test_framework,
             "dependency_manager": dependency_manager,
+            "env_source": env_source,
+            "conda_env_dir": conda_env_dir,
         }
         with open(os.path.join(project_dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -311,8 +516,13 @@ class ProjectService:
         project_dir = ProjectService.get_project_path(project_id)
         file_paths = []
         for root, dirs, files in os.walk(project_dir):
-            # 不展示系统缓存目录 _cache 和任务目录 _tasks
-            dirs[:] = [d for d in dirs if d not in {"_cache", "_tasks", ".git", "__pycache__", ".venv", "venv", "node_modules", ".pytest_cache"}]
+            # 不展示系统/环境相关目录：_cache、_tasks、.conda_env（用户上传的离线 conda 环境）、
+            # .venv/venv（工具自动建的虚拟环境）、各种缓存。这些都不应被解析为项目函数或展示给用户浏览。
+            dirs[:] = [d for d in dirs if d not in {
+                "_cache", "_tasks", ".git", "__pycache__",
+                ".venv", "venv", "node_modules", ".pytest_cache",
+                ".conda_env",  # conda-pack 离线环境（含海量 site-packages 的 .py/.txt）
+            }]
             for file in files:
                 if file.endswith(('.c', '.h', '.py', '.json', '.toml', '.txt')):
                     # Skip meta.json at the project root
@@ -496,6 +706,7 @@ class ProjectService:
                             "language": meta.get("language", scan_info["language"]),
                             "test_framework": meta.get("test_framework", ProjectService._default_framework_for_language(scan_info["language"])),
                             "dependency_manager": meta.get("dependency_manager", scan_info["dependency_manager"]),
+                            "env_source": meta.get("env_source", "none"),
                         })
         else:
             # 独立模式：目录结构为 proj_YYYYMMDD_xxxx/
@@ -514,6 +725,7 @@ class ProjectService:
                         "language": meta.get("language", scan_info["language"]),
                         "test_framework": meta.get("test_framework", ProjectService._default_framework_for_language(scan_info["language"])),
                         "dependency_manager": meta.get("dependency_manager", scan_info["dependency_manager"]),
+                        "env_source": meta.get("env_source", "none"),
                     })
             projects = sorted(projects, key=lambda x: x['project_id'], reverse=True)
 

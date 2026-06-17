@@ -32,6 +32,14 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     lcov \
     && rm -rf /var/lib/apt/lists/*
 
+# 安装 miniconda（用于导入用户用 conda-pack 打包的离线 Python 环境）
+# conda-unpack 是打包进 tar.gz 的脚本，靠环境内自带 Python 运行，
+# 装 conda 主要为了 conda-unpack / conda activate / 排错更方便。
+RUN wget -q https://mirrors.aliyun.com/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh \
+    && bash /tmp/miniconda.sh -b -u -p /opt/conda \
+    && rm /tmp/miniconda.sh
+ENV PATH="/opt/conda/bin:${PATH}"
+
 # 安装 Joern (本地安装模式)
 WORKDIR /opt/joern
 # 复制本地的 joern-cli.zip 到镜像中 (假设该文件在构建上下文根目录)

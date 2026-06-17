@@ -46,6 +46,11 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# 安装 miniconda（用于导入用户用 conda-pack 打包的离线 Python 环境）
+RUN wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh \
+&& bash /tmp/miniconda.sh -b -u -p /opt/conda \
+&& rm /tmp/miniconda.sh
+
 # Install Joern by mounting the zip from build context (BuildKit).
 # The zip is NEVER copied into any image layer — only the extracted joern-cli/ remains.
 RUN --mount=type=bind,source=joern-cli.zip,target=/tmp/joern-cli.zip \

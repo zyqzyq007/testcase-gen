@@ -35,6 +35,7 @@ async def upload_project(
         language=meta.get("language"),
         test_framework=meta.get("test_framework"),
         dependency_manager=meta.get("dependency_manager"),
+        env_source=meta.get("env_source", "none"),
     )
 
 @router.get("/list", response_model=List[UploadResponse])
@@ -468,6 +469,35 @@ async def get_function_detail(project_id: str, function_id: str, use_joern: bool
         "is_method": target_func.is_method,
         "is_async": target_func.is_async,
     }
+
+@router.get("/{project_id}/function/{function_id}/requirement-context")
+async def get_function_requirement_context(project_id: str, function_id: str):
+    """
+    查询上游追溯工具中与该函数关联的需求上下文，供前端展示。
+    """
+    from app.services.upstream_service import UpstreamService
+    try:
+        parts = function_id.rsplit('_', 1)
+        file_id = parts[0]
+        start_line = int(parts[1])
+        path = base64.urlsafe_b64decode(file_id).decode()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid function_id")
+
+    language = ProjectService.get_project_language(project_id)
+    content = ProjectService.get_file_content(project_id, path)
+    functions = ParserService.parse_functions(content, file_id, file_path=path, language=language)
+    target_func = next((f for f in functions if f.start_line == start_line), None)
+    if not target_func:
+        raise HTTPException(status_code=404, detail="Function not found")
+
+    req_ctx = UpstreamService.get_requirement_context(
+        project_id,
+        target_func.name,
+        path,
+        signature=getattr(target_func, "signature", None),
+    )
+    return req_ctx or {}
 
 @router.get("/{project_id}/function/{function_id}/graph")
 async def get_function_graph(project_id: str, function_id: str, use_joern: bool = Query(False), refresh: bool = Query(False)):
