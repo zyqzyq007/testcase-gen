@@ -6,10 +6,80 @@
         <h1 class="text-3xl font-bold text-slate-900">开始测试您的项目</h1>
         <p class="text-slate-500 font-medium">支持 C 或 Python 项目，上传源码文件或 .zip 压缩包以开始自动化测试生成</p>
         <p class="text-xs text-slate-400 max-w-2xl mx-auto leading-relaxed">
-          离线环境提示：Python 项目可将
-          <code class="px-1 py-0.5 bg-slate-100 rounded text-primary-700">conda pack</code>
-          打包的环境（如 <code class="px-1 py-0.5 bg-slate-100 rounded text-primary-700">env.tar.gz</code>）连同源码一起放入 zip 上传，工具会自动识别并在该环境中运行测试，无需联网安装依赖。
+          上传 Python 项目时需同时上传打包好的运行环境（与源码一起放进 zip）。
+          <button
+            type="button"
+            @click="showEnvGuide = true"
+            class="ml-1 text-primary-600 hover:text-primary-700 underline underline-offset-2 font-medium"
+          >如何打包 env.tar.gz？</button>
         </p>
+      </div>
+
+      <!-- 离线环境打包指引弹窗 -->
+      <div
+        v-if="showEnvGuide"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        @click.self="showEnvGuide = false"
+      >
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+          <!-- 弹窗头 -->
+          <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+            <h2 class="text-lg font-bold text-slate-900">如何打包离线环境 env.tar.gz</h2>
+            <button
+              type="button"
+              @click="showEnvGuide = false"
+              class="text-slate-400 hover:text-slate-600 transition-colors"
+            >
+              <X class="w-5 h-5" />
+            </button>
+          </div>
+
+          <!-- 弹窗正文 -->
+          <div class="px-6 py-5 overflow-y-auto space-y-4 text-sm leading-relaxed text-slate-700">
+            <div class="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs">
+              必须用 <code class="px-1 bg-amber-100 rounded">conda pack</code> 打包（不能用 venv 手搓）。环境里要装齐项目全部依赖 + <code class="px-1 bg-amber-100 rounded">pytest/coverage/pytest-cov</code>。
+            </div>
+
+            <div>
+              <pre class="bg-slate-900 text-slate-100 text-xs rounded-lg p-3 overflow-x-auto"><code># 1. 建环境（Python 版本按项目填）
+conda create -y -n myenv python=3.8
+conda activate myenv
+conda install -y -c conda-forge conda-pack
+
+# 2. 装项目依赖（有 requirements.txt 用它；conda 能装的也可 conda install）
+pip install -r requirements.txt
+
+# 3. 必须补装测试框架所需包
+pip install pytest coverage pytest-cov
+
+# 4. 打包
+conda pack -n myenv -o env.tar.gz --force --ignore-missing-files</code></pre>
+            </div>
+
+            <div>
+              <p class="font-semibold text-slate-900 mb-1">要点</p>
+              <ul class="list-disc list-inside space-y-1 text-xs">
+                <li>Python 版本要自己在第 1 步指定（requirements.txt 里通常没有）。</li>
+                <li>conda 与 pip 可混用，都装进同一个 conda 环境即可。</li>
+                <li>环境装完、无 conda 进程在跑后再打包，避免包内不全。</li>
+              </ul>
+            </div>
+
+            <div>
+              <p class="font-semibold text-slate-900 mb-1">如何上传</p>
+              <p class="text-xs text-slate-600">把生成的 <code class="px-1 py-0.5 bg-slate-100 rounded">env.tar.gz</code> 与源码放进同一个 zip 上传；也可直接选整个文件夹上传（自动打包）。</p>
+            </div>
+          </div>
+
+          <!-- 弹窗底 -->
+          <div class="px-6 py-4 border-t border-slate-200 flex justify-end">
+            <button
+              type="button"
+              @click="showEnvGuide = false"
+              class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-lg transition-colors"
+            >我知道了</button>
+          </div>
+        </div>
       </div>
 
       <!-- Upload Card -->
@@ -22,14 +92,25 @@
           @drop.prevent="handleDrop"
         >
           <input type="file" ref="fileInput" class="hidden" @change="handleFileChange" accept=".c,.h,.py,.zip" />
-          <div class="flex flex-col items-center space-y-4">
+          <input type="file" ref="folderInput" class="hidden" webkitdirectory directory multiple @change="handleFolderChange" />
+          <div v-if="!packing" class="flex flex-col items-center space-y-4">
             <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center group-hover:bg-primary-50 transition-colors">
               <Upload class="w-8 h-8 text-slate-400 group-hover:text-primary-600" />
             </div>
             <div class="space-y-1">
               <p class="text-lg font-bold text-slate-700">点击或拖拽文件至此处上传</p>
-              <p class="text-sm text-slate-500">支持 .c, .h, .py 或包含项目的 .zip 文件</p>
+              <p class="text-sm text-slate-500">支持 .c, .h, .py、.zip，或上传整个文件夹</p>
             </div>
+            <button
+              type="button"
+              @click.stop="triggerFolderInput"
+              class="text-sm text-primary-600 hover:text-primary-700 underline underline-offset-2 font-medium"
+            >或选择整个文件夹（自动打包为 zip）</button>
+          </div>
+          <div v-else class="flex flex-col items-center space-y-3 py-4">
+            <RotateCw class="w-8 h-8 text-primary-600 animate-spin" />
+            <p class="text-sm font-medium text-slate-700">正在打包文件夹... {{ packProgress }}%</p>
+            <p class="text-xs text-slate-400">大文件夹（含离线环境 env.tar.gz）可能需要数十秒</p>
           </div>
         </div>
 
@@ -224,6 +305,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../store'
 import axios from 'axios'
+import JSZip from 'jszip'
 import { Upload, History, FileCode, Package, ChevronRight, X, RotateCw, Trash2, Zap, AlertTriangle } from 'lucide-vue-next'
 
 const router = useRouter()
@@ -231,6 +313,7 @@ const store = useAppStore()
 
 const fileInput = ref(null)
 const selectedFile = ref(null)
+const showEnvGuide = ref(false)
 const projectName = ref('')
 const uploading = ref(false)
 const uploadProgress = ref(0)
@@ -265,6 +348,41 @@ const totalProgress = computed(() => {
 })
 
 const triggerFileInput = () => fileInput.value.click()
+const folderInput = ref(null)
+const packing = ref(false)
+const packProgress = ref(0)
+
+const triggerFolderInput = () => folderInput.value.click()
+
+const handleFolderChange = async (e) => {
+  const files = Array.from(e.target.files || [])
+  if (!files.length) return
+
+  packing.value = true
+  packProgress.value = 0
+  try {
+    const zip = new JSZip()
+    // webkitRelativePath 形如 "myproject/src/main.py"，保留相对结构（含顶层文件夹名）
+    for (const f of files) {
+      const rel = f.webkitRelativePath || f.name
+      zip.file(rel, f)
+    }
+    // STORE 模式不压缩：源码体积小可忽略，而 env.tar.gz 等已压缩内容避免重复压缩拖慢打包
+    const blob = await zip.generateAsync(
+      { type: 'blob', compression: 'STORE' },
+      (meta) => { packProgress.value = Math.round(meta.percent) }
+    )
+    const folderName = (files[0].webkitRelativePath || files[0].name).split('/')[0] || 'project'
+    const zipped = new File([blob], `${folderName}.zip`, { type: 'application/zip' })
+    prepareUpload(zipped)
+  } catch (err) {
+    console.error('zip folder failed', err)
+    alert('文件夹打包失败，请重试，或改用将文件夹压缩为 zip 后上传')
+  } finally {
+    packing.value = false
+    if (folderInput.value) folderInput.value.value = ''
+  }
+}
 
 const handleFileChange = (e) => {
   const file = e.target.files[0]

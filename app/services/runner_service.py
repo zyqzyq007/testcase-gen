@@ -785,11 +785,9 @@ class RunnerService:
         版本隔离原则：必须使用 env 自带的 Python（如 3.8），绝不回退到 Docker 宿主
         Python（否则 C 扩展 .so 版本不匹配，且 PYTHONHOME 会让宿主 Python 崩溃）。
 
-        流程：
-        1. 用 _build_conda_env_vars（含 PYTHONHOME=env_dir）测试 env 自带 python；
-           真 conda-pack 的 bin/python 用相对路径解析 stdlib，开箱即用。
-        2. 若裸测失败，运行一次 conda-unpack（重写构建机旧前缀）后重试。
-        3. 仍不可用则硬失败，给出清晰错误（不静默回退系统 Python）。
+        meta（zip 上传时由 create_project 写入）标记 conda_pack 的项目走本方法：
+        环境已解压在【可写】的本地 project_dir/.conda_env，原地复用即可。
+        共享卷项目缺 meta 且卷只读，改走 _resolve_shared_conda_env 落盘到可写缓存。
         """
         meta = ProjectService.get_project_meta(project_id)
         conda_env_rel = meta.get("conda_env_dir") or ".conda_env"
@@ -798,6 +796,23 @@ class RunnerService:
         if not os.path.isdir(env_dir):
             return None, None, f"Conda env directory not found: {conda_env_rel}"
 
+        return await RunnerService._activate_conda_env_dir(env_dir)
+
+    @staticmethod
+    async def _activate_conda_env_dir(
+        env_dir: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        给定一个已就绪、可写的 conda-pack 环境目录（含 bin/python），验证其可用性并返回
+        (python_bin, env_dir, error)。
+
+        流程：
+        1. 用 _build_conda_env_vars（含 PYTHONHOME=env_dir）测试 env 自带 python；
+           真 conda-pack 的 bin/python 用相对路径解析 stdlib，开箱即用。
+        2. 若裸测失败，运行一次 conda-unpack（重写构建机旧前缀，会写进 env 目录，故 env_dir
+           必须可写）后重试。
+        3. 仍不可用则硬失败，给出清晰错误（不静默回退系统 Python）。
+        """
         env_python = os.path.join(env_dir, "bin", "python")
         if not os.path.exists(env_python):
             return None, None, f"Python interpreter not found in conda env: {env_python}"
@@ -830,6 +845,104 @@ class RunnerService:
             )
 
         return env_python, env_dir, None
+
+    @staticmethod
+    async def _resolve_shared_conda_env(
+        project_id: str, project_dir: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        共享卷（只读）/ 缺少 meta 的情况：运行时按需发现并落盘可用的 conda-pack 环境。
+        返回 (python_bin, env_dir_abs, error)：
+          - (None, None, None) → 项目里没有 conda 环境，由调用方回退到 venv；
+          - (None, None, msg)  → 发现了环境但无法激活，视为硬错误（msg 上报）；
+          - (py, dir, None)    → 成功。
+
+        背景：zip 上传走 create_project，会扫描 env.tar.gz 并写入 meta(env_source=conda_pack)，
+        且解压到【可写】的本地 project_dir/.conda_env。而共享卷项目只被目录扫描发现，不经过
+        create_project，既没有 meta、卷又是只读，所以这里需要：
+          1) 在 project_dir 下发现 env（已解压的 .conda_env 目录，或 env.tar.gz 归档）；
+          2) 落盘到本工具私有可写目录 LOCAL_WORKSPACES_DIR/{project_id}/.conda_env；
+          3) 在该可写副本上验证 / conda-unpack（unpack 会写进 env 目录，只读卷上做不了）。
+        结果按 project_id 缓存（带 ready 标记 + mkdir 锁），多任务并发只落盘一次。
+        """
+        local_dir = ProjectService.get_local_project_dir(project_id)
+        cache_dir = os.path.join(local_dir, ".conda_env")
+        ready_marker = os.path.join(cache_dir, ".env_ready")
+        lock_dir = os.path.join(local_dir, ".conda_env.lock")
+        cache_python = os.path.join(cache_dir, "bin", "python")
+
+        def _cache_ready() -> bool:
+            return os.path.isfile(ready_marker) and os.path.exists(cache_python)
+
+        # 快路径：缓存副本已就绪，直接激活
+        if _cache_ready():
+            return await RunnerService._activate_conda_env_dir(cache_dir)
+
+        # 1) 发现 env 来源：优先已解压的 .conda_env 目录，其次归档（env.tar.gz 等）
+        meta = ProjectService.get_project_meta(project_id)
+        rel = meta.get("conda_env_dir") or ".conda_env"
+        src_dir = os.path.join(project_dir, rel)
+        if os.path.isdir(src_dir) and os.path.isdir(os.path.join(src_dir, "bin")):
+            src_kind, src_path = "dir", src_dir
+        else:
+            info = ProjectService._scan_for_conda_env(project_dir)
+            if not info:
+                return None, None, None  # 没有环境 → venv 回退
+            src_kind, src_path = "archive", info["archive_path"]
+
+        # 2) 落盘到可写缓存（mkdir 原子锁，保证并发只落一次）
+        def _try_acquire() -> bool:
+            try:
+                os.mkdir(lock_dir)
+                return True
+            except FileExistsError:
+                return False
+
+        acquired = _try_acquire()
+        if not acquired:
+            wait_steps = max(1, PYTHON_INSTALL_TIMEOUT // 2)
+            for _ in range(wait_steps):
+                if _cache_ready():
+                    return await RunnerService._activate_conda_env_dir(cache_dir)
+                await asyncio.sleep(1)
+            acquired = _try_acquire()
+
+        if acquired:
+            try:
+                if _cache_ready():
+                    return await RunnerService._activate_conda_env_dir(cache_dir)
+                # 落盘（重 IO，放线程里执行，避免阻塞事件循环）：
+                # 归档 → 解压；目录 → 复制（源在只读卷，必须拷到可写位置；保留符号链接）
+                def _stage() -> bool:
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                    if src_kind == "archive":
+                        return ProjectService._extract_conda_env(src_path, cache_dir)
+                    try:
+                        shutil.copytree(src_path, cache_dir, symlinks=True, dirs_exist_ok=True)
+                        return True
+                    except Exception:
+                        return False
+
+                ok = await asyncio.to_thread(_stage)
+                if not ok or not os.path.isdir(os.path.join(cache_dir, "bin")):
+                    return None, None, "Failed to stage conda env into writable cache."
+                # 副本可写 → 写就绪标记（激活时按需 conda-unpack）
+                try:
+                    with open(ready_marker, "w") as f:
+                        f.write("ready")
+                except OSError:
+                    pass
+                return await RunnerService._activate_conda_env_dir(cache_dir)
+            finally:
+                try:
+                    os.rmdir(lock_dir)
+                except OSError:
+                    pass
+
+        # 既没拿到锁、等待也超时：缓存若恰好可用就复用，否则报错
+        if _cache_ready():
+            return await RunnerService._activate_conda_env_dir(cache_dir)
+        return None, None, "Conda env is being staged by another task; please retry shortly."
 
     @staticmethod
     def _build_conda_env_vars(env_dir: str) -> Dict[str, str]:
@@ -909,13 +1022,16 @@ class RunnerService:
         test_file_name = RunnerService._get_test_file_name(metadata)
 
         # 根据项目是否携带 conda-pack 离线环境分流：
-        #   conda_pack → 复用用户上传的预置环境（含解释器），全程不联网
-        #   否则      → 回退到现有 _prepare_project_venv（联网 pip install）
+        #   meta 标记 conda_pack（zip 上传） → 复用用户预置环境（含解释器），全程不联网
+        #   共享卷 / 缺 meta                 → 运行时按需发现 env 并落盘到可写缓存后复用
+        #   否则                             → 回退 _prepare_project_venv（联网 pip install）
         meta = ProjectService.get_project_meta(metadata["project_id"])
         env_source = meta.get("env_source", "none")
 
         conda_env_dir_abs = None
         pip_bin = None
+        python_bin = None
+        venv_error = None
         if env_source == "conda_pack":
             python_bin, conda_env_dir_abs, venv_error = await RunnerService._prepare_conda_env(
                 metadata["project_id"], project_dir
@@ -923,9 +1039,20 @@ class RunnerService:
             if python_bin:
                 pip_bin = os.path.join(os.path.dirname(python_bin), "pip")
         else:
-            python_bin, pip_bin, venv_error = await RunnerService._prepare_project_venv(
+            py, env_abs, err = await RunnerService._resolve_shared_conda_env(
                 metadata["project_id"], project_dir
             )
+            if py:
+                python_bin, conda_env_dir_abs = py, env_abs
+                pip_bin = os.path.join(os.path.dirname(py), "pip")
+            elif err:
+                # 发现了环境但无法激活 → 直接报错（不静默回退 venv，否则同样缺 pandas 且提示不清）
+                venv_error = err
+            else:
+                # 项目里没有 conda 环境 → 联网 venv 回退
+                python_bin, pip_bin, venv_error = await RunnerService._prepare_project_venv(
+                    metadata["project_id"], project_dir
+                )
 
         if venv_error:
             metadata["error"] = {"compile_error": venv_error, "stage": "venv"}
@@ -997,7 +1124,7 @@ class RunnerService:
                 missing_dep = False
             if missing_dep:
                 err_text = (check_err.decode(errors="replace") if check_err else "") or (check_out.decode(errors="replace") if check_out else "")
-                if env_source == "conda_pack":
+                if conda_env_dir_abs:
                     dep_error = (
                         f"Module '{module_name}' failed to import in the conda env.\n"
                         f"A dependency is not included in env.tar.gz. Please rebuild the\n"

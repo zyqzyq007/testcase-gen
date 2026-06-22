@@ -193,12 +193,61 @@ class UpstreamService:
         return False
 
     @staticmethod
+    def _name_candidates(function_name: Optional[str], qualified_name: Optional[str]) -> set:
+        """
+        由被测函数名构造候选名集合，用于和上游追溯链路里的 function_name 匹配。
+        覆盖上游工具与本地解析器在命名上的常见差异：
+          - 裸名（如 describe）
+          - 类限定名 Class.method（如 Analyzer.describe）
+          - 下划线形式 Class__method（部分工具用 Python module 风格）
+          - 限定名的末段（兼容上游记录 module.Class.method 的情况）
+        """
+        cands = set()
+        if function_name:
+            cands.add(function_name.strip())
+        if qualified_name:
+            qn = qualified_name.strip()
+            cands.add(qn)
+            cands.add(qn.replace(".", "__"))
+        # 末段：兼容上游记录 "module.Class.method" 而本地只有裸名/类限定名
+        for c in list(cands):
+            if "." in c:
+                cands.add(c.rsplit(".", 1)[-1])
+        return {c for c in cands if c}
+
+    @staticmethod
+    def _select_links_by_name(
+        trace_links: List[Dict[str, Any]],
+        candidates: set,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        按函数名从链路中筛选，返回 (精确匹配, 末段兜底匹配)。
+        优先用精确匹配（链路 function_name 完整出现在候选集中）；
+        若无精确匹配，再用「末段相等」兜底（链路 function_name 去掉前缀限定后等于候选），
+        以兼容上游用 module.Class.method 记录、而本地解析为裸名的情况。
+        末段兜底更宽松，单独返回，供精确匹配为空时使用，降低重名误配风险。
+        """
+        exact, suffix = [], []
+        for link in trace_links:
+            lfn = (link.get("function_name", "") or "").strip()
+            if not lfn:
+                continue
+            if lfn in candidates:
+                exact.append(link)
+                continue
+            last = lfn.rsplit(".", 1)[-1] if "." in lfn else lfn
+            if last in candidates:
+                suffix.append(link)
+        return exact, suffix
+
+    @staticmethod
     def get_requirement_context(
         project_id: str,
         function_name: str,
         source_file: str,
         signature: Optional[str] = None,
         strict_rank1: bool = False,
+        qualified_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         根据函数名和源文件路径，从上游数据中获取需求上下文。
@@ -231,11 +280,12 @@ class UpstreamService:
         if not trace_links:
             return None
 
-        # Step 1: 按函数名精确匹配
-        by_name = [
-            link for link in trace_links
-            if link.get("function_name", "").strip() == function_name.strip()
-        ]
+        # Step 1: 按函数名匹配（精确优先，末段兜底）
+        # 本地解析器对 Python 类方法只给裸名（如 describe），而上游追溯工具常记录
+        # 类限定名（Analyzer.describe）甚至 module.Class.method，直接精确相等会漏配。
+        candidates = UpstreamService._name_candidates(function_name, qualified_name)
+        exact, suffix = UpstreamService._select_links_by_name(trace_links, candidates)
+        by_name = exact if exact else suffix
         if not by_name:
             return None
 

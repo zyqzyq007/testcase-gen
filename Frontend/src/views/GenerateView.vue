@@ -803,7 +803,11 @@ watch(() => store.functionId, (newId, oldId) => {
     funcDetail.value = null
     codeGraph.value = null
     generatedCode.value = ''
+    requirementContext.value = null
     fetchFunctionDetail()
+    // 切换函数时必须重新拉取该函数对应的上游需求（onMounted 只触发一次，
+    // keep-alive 下切函数不会再走 onMounted，否则需求卡片永远不更新）
+    fetchRequirementContext()
   }
 })
 

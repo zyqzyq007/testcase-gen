@@ -270,6 +270,86 @@ async def export_test_results(project_id: str, portal_project_id: str = Query(No
 
     return result
 
+
+# ---- 测试用例拆分 / 注释中文化（供 DOCX 导出使用）----
+_TESTCASE_COMMENT_MAP = [
+    (re.compile(r'^\s*#\s*objective\s*[:：]\s*', re.IGNORECASE), '测试目标：'),
+    (re.compile(r'^\s*#\s*preconditions?\s*[:：]\s*', re.IGNORECASE), '前置条件：'),
+    (re.compile(r'^\s*#\s*expected\s*results?\s*[:：]\s*', re.IGNORECASE), '预期结果：'),
+    (re.compile(r'^\s*#\s*steps?\s*[:：]\s*', re.IGNORECASE), '测试步骤：'),
+    (re.compile(r'^\s*#\s*note\s*[:：]\s*', re.IGNORECASE), '备注：'),
+]
+
+
+def _ensure_period(s: str) -> str:
+    s = s.rstrip()
+    if s and s[-1] not in '。.；;！!？?':
+        s += '。'
+    return s
+
+
+def _comments_to_chinese(comment_lines) -> str:
+    """把测试函数前的英文注释（Objective/Preconditions/Expected Results…）
+    转成一段可读的中文描述。"""
+    parts = []
+    for raw in comment_lines:
+        for pat, label in _TESTCASE_COMMENT_MAP:
+            m = pat.match(raw)
+            if m:
+                content = raw[m.end():].strip()
+                parts.append(label + _ensure_period(content))
+                break
+        else:
+            text = raw.lstrip().lstrip('#').strip()
+            if text:
+                parts.append(_ensure_period(text))
+    return ' '.join(parts)
+
+
+def _split_test_cases(code: str):
+    """把测试源码按顶层 def 拆成独立用例，返回 [{name, comments, body}]。
+    每个用例的 comments 为紧贴 def 上方的连续 # 注释行。"""
+    if not code:
+        return []
+    lines = code.splitlines()
+    bounds = [i for i, ln in enumerate(lines) if re.match(r'^def\s+\w+\s*\(', ln)]
+    if not bounds:
+        return []
+    cases = []
+    for k, start in enumerate(bounds):
+        end = bounds[k + 1] if k + 1 < len(bounds) else len(lines)
+        m = re.match(r'^def\s+(\w+)\s*\(', lines[start])
+        name = m.group(1) if m else f'case_{k + 1}'
+        # 向上收集紧贴的注释块（允许中间有空行）
+        comments = []
+        j = start - 1
+        blanks = 0
+        while j >= 0:
+            stripped = lines[j].strip()
+            if stripped == '':
+                blanks += 1
+                if blanks > 2:
+                    break
+                j -= 1
+                continue
+            if stripped.startswith('#'):
+                comments.append(lines[j])
+                blanks = 0
+                j -= 1
+                continue
+            break
+        comments.reverse()
+        body_lines = lines[start:end]
+        while body_lines and body_lines[-1].strip() == '':
+            body_lines.pop()
+        cases.append({
+            'name': name,
+            'comments': comments,
+            'body': '\n'.join(body_lines),
+        })
+    return cases
+
+
 @router.get("/{project_id}/export-docx")
 async def export_test_results_docx(project_id: str):
     """
@@ -357,14 +437,31 @@ async def export_test_results_docx(project_id: str):
             info_table.rows[j].cells[1].text = val
         _set_table_font(info_table)
 
-        # Test code
+        # Test code → 拆分为独立用例，注释转中文段落分别展示
         cache_data = CacheService.get_function_data(project_id, func["source_file"], func.get("qualified_name") or func["name"])
         test_code = cache_data.get("test_code")
         if test_code:
-            doc.add_heading('测试代码', level=3)
-            p = doc.add_paragraph()
-            run = p.add_run(test_code[:5000])
-            LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=8)
+            cases = _split_test_cases(test_code)
+            if cases:
+                doc.add_heading('测试用例', level=3)
+                for ci, case in enumerate(cases, 1):
+                    # 用例标题
+                    doc.add_heading(f'用例 {ci}：{case["name"]}', level=4)
+                    # 注释 → 可读中文段落
+                    desc = _comments_to_chinese(case["comments"])
+                    if desc:
+                        LLMService._add_paragraph_with_font(doc, desc, size=10)
+                    # 该用例的代码
+                    p = doc.add_paragraph()
+                    run = p.add_run(case["body"][:4000])
+                    LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=8)
+                    doc.add_paragraph()
+            else:
+                # 无法按 def 拆分时兜底：整块展示
+                doc.add_heading('测试代码', level=3)
+                p = doc.add_paragraph()
+                run = p.add_run(test_code[:5000])
+                LLMService._set_run_font(run, western="Consolas", east_asian="Microsoft YaHei", size=8)
 
         doc.add_paragraph()
 
@@ -496,6 +593,7 @@ async def get_function_requirement_context(project_id: str, function_id: str):
         target_func.name,
         path,
         signature=getattr(target_func, "signature", None),
+        qualified_name=getattr(target_func, "qualified_name", None),
     )
     return req_ctx or {}
 
