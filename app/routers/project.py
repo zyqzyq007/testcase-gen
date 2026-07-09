@@ -243,22 +243,13 @@ async def export_test_results(project_id: str, portal_project_id: str = Query(No
         "functions": funcs,
     }
 
-    # 同步写入共享卷:
-    # {storage}/{portal_project_id}/{project_id}/{解压文件夹}/unit-test-generate/unit-test-generate.json
+    # 同步写入共享卷（与 project_name 同级，而非嵌套在其内部）:
+    # {storage}/{portal_project_id}/{project_id}/unit-test-generate/unit-test-generate.json
     storage = os.getenv("UNIPORTAL_STORAGE_PATH")
     if storage and os.path.isdir(storage) and portal_project_id:
         import json as _json
         item_dir = os.path.join(storage, portal_project_id, project_id)
-        # 找到 zip 解压出来的源码文件夹（排除隐藏目录和生成物）
-        src_dir = item_dir  # fallback
-        if os.path.isdir(item_dir):
-            subdirs = [d for d in os.listdir(item_dir)
-                       if os.path.isdir(os.path.join(item_dir, d))
-                       and not d.startswith(('.', '_'))
-                       and d not in {"unit-test-generate", "graphs", "__pycache__"}]
-            if len(subdirs) == 1:
-                src_dir = os.path.join(item_dir, subdirs[0])
-        out_dir = os.path.join(src_dir, "unit-test-generate")
+        out_dir = os.path.join(item_dir, "unit-test-generate")
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, "unit-test-generate.json")
         try:
